@@ -14,7 +14,7 @@ use findb::Query;
 
 const PRICING_FILE: &str = "test/content/faangm_202006_close.csv";
 
-fn main() -> Result<()>{
+fn main() -> Result<()> {
     println!("Loading table.");
     let batch = read_pricing_file(PRICING_FILE, 1024).unwrap().unwrap();
 
@@ -32,13 +32,12 @@ fn main() -> Result<()>{
             end_date: 20200624,
             eff_timestamp: 1595807440,
             asset_ids: vec!["NTFZ".to_string(), "AAPL".to_string()],
-        }
+        },
     ];
 
     let result = Query::query_all(&query_list, &batch, 4)?;
     print_batches(&result[..])
 }
-
 
 fn pricing_schema() -> Schema {
     Schema::new(vec![
@@ -52,7 +51,13 @@ fn pricing_schema() -> Schema {
 
 fn read_pricing_file(file: &str, batch_size: usize) -> Result<Option<RecordBatch>> {
     let file = File::open(file).unwrap();
-    let mut reader = Reader::new(file, Arc::new(pricing_schema()), true, None, batch_size, None);
+    let mut reader = Reader::new(
+        file,
+        Arc::new(pricing_schema()),
+        true,
+        None,
+        batch_size,
+        None,
+    );
     reader.next()
 }
-

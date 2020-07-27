@@ -6,7 +6,7 @@ use arrow::compute::kernels::{boolean, comparison, filter};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::Result;
 use arrow::record_batch::RecordBatch;
-use itertools::{Itertools, process_results};
+use itertools::{process_results, Itertools};
 
 pub struct Query {
     pub build_date: u32,
@@ -17,9 +17,15 @@ pub struct Query {
 }
 
 impl Query {
-    pub fn query_all(queries: &Vec<Query>, batch: &RecordBatch, value_column_index: usize) -> Result<Vec<RecordBatch>> {
+    pub fn query_all(
+        queries: &Vec<Query>,
+        batch: &RecordBatch,
+        value_column_index: usize,
+    ) -> Result<Vec<RecordBatch>> {
         let mut asset_id_queries = HashMap::new();
-        let results = queries.into_iter().map(|q| q.query(batch, value_column_index, &mut asset_id_queries));
+        let results = queries
+            .into_iter()
+            .map(|q| q.query(batch, value_column_index, &mut asset_id_queries));
         process_results(results, |r| r.collect_vec())
     }
 
@@ -30,26 +36,32 @@ impl Query {
         )
     }
 
-    fn query_asset_ids<'a>(&'a self, asset_id_column: &StringArray, asset_id_queries: &mut HashMap<&'a String,
-        Arc<BooleanArray>>) -> Result<Option<Arc<BooleanArray>>> {
+    fn query_asset_ids<'a>(
+        &'a self,
+        asset_id_column: &StringArray,
+        asset_id_queries: &mut HashMap<&'a String, Arc<BooleanArray>>,
+    ) -> Result<Option<Arc<BooleanArray>>> {
         let mut res: Option<Arc<BooleanArray>> = Option::None;
         for asset_id in self.asset_ids.iter() {
-            let asset_id_query = Query::query_asset_id(&asset_id, asset_id_column, asset_id_queries)?;
+            let asset_id_query =
+                Query::query_asset_id(&asset_id, asset_id_column, asset_id_queries)?;
             res = Some(match res {
                 None => asset_id_query,
                 Some(or_cond) => {
                     let new_or_cond = boolean::or(&or_cond, &asset_id_query)?;
                     Arc::new(new_or_cond)
-                },
+                }
             })
         }
 
         Ok(res)
     }
 
-    fn query_asset_id<'a>(asset_id: &'a String,
-                          asset_id_column: &StringArray,
-                          asset_id_queries: &mut HashMap<&'a String, Arc<BooleanArray>>) -> Result<Arc<BooleanArray>> {
+    fn query_asset_id<'a>(
+        asset_id: &'a String,
+        asset_id_column: &StringArray,
+        asset_id_queries: &mut HashMap<&'a String, Arc<BooleanArray>>,
+    ) -> Result<Arc<BooleanArray>> {
         Ok(match asset_id_queries.get(asset_id) {
             Some(col) => Arc::clone(col),
             None => {
@@ -62,18 +74,23 @@ impl Query {
         })
     }
 
-    fn query_eff_timestamp(&self,
-                           eff_start_column: &UInt64Array,
-                           eff_end_column: &UInt64Array) -> Result<BooleanArray> {
+    fn query_eff_timestamp(
+        &self,
+        eff_start_column: &UInt64Array,
+        eff_end_column: &UInt64Array,
+    ) -> Result<BooleanArray> {
         boolean::and(
             &comparison::lt_eq_scalar(eff_start_column, self.eff_timestamp)?,
             &comparison::gt_eq_scalar(eff_end_column, self.eff_timestamp)?,
         )
     }
 
-    fn query<'a>(&'a self, batch: &RecordBatch,
-                 value_column_index: usize,
-                 asset_id_queries: &mut HashMap<&'a String, Arc<BooleanArray>>) -> Result<RecordBatch> {
+    fn query<'a>(
+        &'a self,
+        batch: &RecordBatch,
+        value_column_index: usize,
+        asset_id_queries: &mut HashMap<&'a String, Arc<BooleanArray>>,
+    ) -> Result<RecordBatch> {
         let date_column: &UInt32Array = get_column(&batch, 0);
         let fid_column: &StringArray = get_column(&batch, 1);
         let eff_start_column: &UInt64Array = get_column(&batch, 2);
@@ -86,7 +103,7 @@ impl Query {
 
         let selection_query = match asset_id_query {
             None => date_range_query,
-            Some(asset_id_query) => boolean::and(&date_range_query, &asset_id_query)?
+            Some(asset_id_query) => boolean::and(&date_range_query, &asset_id_query)?,
         };
         let condition = boolean::and(&selection_query, &eff_date_query)?;
 
@@ -94,14 +111,14 @@ impl Query {
         let res_fid = filter::filter(fid_column, &condition).unwrap();
         let res_close = filter::filter(value_column, &condition).unwrap();
 
-
         let len = res_date.len();
         let mut build_date_column_builder = UInt32Array::builder(len);
         for _ in 0..len {
-            build_date_column_builder.append_value(self.build_date).unwrap();
+            build_date_column_builder
+                .append_value(self.build_date)
+                .unwrap();
         }
         let res_build_date = Arc::new(build_date_column_builder.finish());
-
 
         let res_schema = Schema::new(vec![
             Field::new("build_date", DataType::UInt32, false),
@@ -115,7 +132,6 @@ impl Query {
         )
     }
 }
-
 
 fn get_column<T: 'static>(batch: &RecordBatch, index: usize) -> &T {
     batch

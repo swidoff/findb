@@ -62,7 +62,7 @@ fn test_one_name_one_date() {
 }
 
 #[test]
-fn test_two_names_two_date() {
+fn test_two_names_two_dates() {
     let batch = read_faangm_20206_close();
     let target_date1 = 20200623;
     let target_date2 = 20200624;

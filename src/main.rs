@@ -12,7 +12,7 @@ use arrow::util::pretty::print_batches;
 
 use findb::Query;
 
-const PRICING_FILE: &str = "test/content/faangm_202006_close.csv";
+const PRICING_FILE: &str = "tests/content/faangm_202006_close.csv";
 
 fn main() -> Result<()> {
     println!("Loading table.");

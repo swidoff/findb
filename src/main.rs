@@ -1,14 +1,14 @@
 use std::fs::File;
 use std::sync::Arc;
 
-use arrow::array::{BooleanArray, Float64Array, StringArray, UInt32Array, UInt64Array};
-use arrow::compute::kernels::{boolean, comparison, filter};
+
+
 use arrow::csv::Reader;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::Result;
 use arrow::record_batch::RecordBatch;
 use arrow::util::pretty::print_batches;
-use itertools::Itertools;
+
 
 use findb::Query;
 

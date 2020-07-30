@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use arrow::csv::Reader;
 use arrow::datatypes::{DataType, Field, Schema};
@@ -7,9 +8,7 @@ use arrow::error::Result;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use arrow::util::pretty::print_batches;
 
-
-use findb::{Query, write_ipc_file, read_ipc_file};
-use std::time::SystemTime;
+use findb::{Query, read_ipc_file, read_ipc_file_memmap, write_ipc_file};
 
 const PRICING_FILE: &str = "content/prices-00.csv";
 const IPC_FILE: &str = "content/prices-00.ipc";
@@ -48,6 +47,7 @@ fn main() -> Result<()> {
 
     println!("Issuing query.");
     let start = SystemTime::now();
+    reader.set_index(reader.num_batches() - 100);
     while let Some(batch) = reader.next_batch()? {
         let result = Query::query_all(&query_list, &batch, 0, 1, 3, 4, 21)?;
         if result.len() > 0 {

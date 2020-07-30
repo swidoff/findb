@@ -20,13 +20,19 @@ impl Query {
     pub fn query_all(
         queries: &Vec<Query>,
         batch: &RecordBatch,
-        value_column_index: usize,
+        date_index: usize,
+        fid_index: usize,
+        eff_start_index: usize,
+        eff_end_index: usize,
+        value_index: usize,
     ) -> Result<Vec<RecordBatch>> {
         let mut asset_id_queries = HashMap::new();
         let results = queries
             .into_iter()
-            .map(|q| q.query(batch, value_column_index, &mut asset_id_queries));
-        process_results(results, |r| r.collect_vec())
+            .map(|q| q.query(
+                batch, date_index, fid_index, eff_start_index, eff_end_index, value_index,
+                &mut asset_id_queries));
+        process_results(results, |r| r.filter_map(|b| b).collect_vec())
     }
 
     fn query_date_range(&self, date_column: &UInt32Array) -> Result<BooleanArray> {
@@ -88,14 +94,18 @@ impl Query {
     fn query<'a>(
         &'a self,
         batch: &RecordBatch,
-        value_column_index: usize,
-        asset_id_queries: &mut HashMap<&'a String, Arc<BooleanArray>>,
-    ) -> Result<RecordBatch> {
-        let date_column: &UInt32Array = get_column(&batch, 0);
-        let fid_column: &StringArray = get_column(&batch, 1);
-        let eff_start_column: &UInt64Array = get_column(&batch, 2);
-        let eff_end_column: &UInt64Array = get_column(&batch, 3);
-        let value_column: &Float64Array = get_column(&batch, value_column_index);
+        date_index: usize,
+        fid_index: usize,
+        eff_start_index: usize,
+        eff_end_index: usize,
+        value_index: usize,
+        asset_id_queries: &mut HashMap<&'a String, Arc<BooleanArray>>
+    ) -> Result<Option<RecordBatch>> {
+        let date_column: &UInt32Array = get_column(&batch, date_index);
+        let fid_column: &StringArray = get_column(&batch, fid_index);
+        let eff_start_column: &UInt64Array = get_column(&batch, eff_start_index);
+        let eff_end_column: &UInt64Array = get_column(&batch, eff_end_index);
+        let value_column: &Float64Array = get_column(&batch, value_index);
 
         let asset_id_query = self.query_asset_ids(fid_column, asset_id_queries)?;
         let date_range_query = self.query_date_range(date_column)?;
@@ -107,29 +117,33 @@ impl Query {
         };
         let condition = boolean::and(&selection_query, &eff_date_query)?;
 
-        let res_date = filter::filter(date_column, &condition).unwrap();
-        let res_fid = filter::filter(fid_column, &condition).unwrap();
-        let res_close = filter::filter(value_column, &condition).unwrap();
+        let res_date = filter::filter(date_column, &condition)?;
+        if res_date.len() == 0 {
+            Ok(None)
+        } else {
+            let res_fid = filter::filter(fid_column, &condition)?;
+            let res_close = filter::filter(value_column, &condition)?;
 
-        let len = res_date.len();
-        let mut build_date_column_builder = UInt32Array::builder(len);
-        for _ in 0..len {
-            build_date_column_builder
-                .append_value(self.build_date)
-                .unwrap();
+            let len = res_date.len();
+            let mut build_date_column_builder = UInt32Array::builder(len);
+            for _ in 0..len {
+                build_date_column_builder
+                    .append_value(self.build_date)
+                    .unwrap();
+            }
+            let res_build_date = Arc::new(build_date_column_builder.finish());
+
+            let res_schema = Schema::new(vec![
+                Field::new("build_date", DataType::UInt32, false),
+                Field::new("fid", DataType::Utf8, false),
+                Field::new("data_date", DataType::UInt32, false),
+                Field::new("close", DataType::Float64, true),
+            ]);
+            RecordBatch::try_new(
+                Arc::new(res_schema),
+                vec![res_build_date, res_fid, res_date, res_close],
+            ).map(|b| Some(b))
         }
-        let res_build_date = Arc::new(build_date_column_builder.finish());
-
-        let res_schema = Schema::new(vec![
-            Field::new("build_date", DataType::UInt32, false),
-            Field::new("fid", DataType::Utf8, false),
-            Field::new("data_date", DataType::UInt32, false),
-            Field::new("close", DataType::Float64, true),
-        ]);
-        RecordBatch::try_new(
-            Arc::new(res_schema),
-            vec![res_build_date, res_fid, res_date, res_close],
-        )
     }
 }
 

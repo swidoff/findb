@@ -8,10 +8,11 @@ use arrow::error::Result;
 use arrow::record_batch::RecordBatchReader;
 use arrow::util::pretty::print_batches;
 
-use findb::{BatchBinarySearch, Query, write_ipc_file};
+use findb::{Index, Query};
 
 const PRICING_FILE: &str = "content/prices-00.csv";
 const IPC_FILE: &str = "content/prices-00.ipc";
+const INDEX_FILE: &str = "content/prices-00.idx";
 
 fn main() -> Result<()> {
     if let Err(_) = File::open(IPC_FILE) {
@@ -19,14 +20,34 @@ fn main() -> Result<()> {
 
         let start = SystemTime::now();
         eprintln!("Writing to ipc_file: {:?}", IPC_FILE);
-        write_ipc_file(&mut reader, IPC_FILE)?;
+        findb::write_ipc_file(&mut reader, IPC_FILE)?;
         eprintln!("Elapsed: {:?}", start.elapsed());
     }
 
     let start = SystemTime::now();
     eprintln!("Reading from: {:?}", IPC_FILE);
-    let mut reader = findb::read_ipc_file_memmap(IPC_FILE)?;
-    eprintln!("Elapsed: {:?}. Num batches: {}", start.elapsed(), reader.num_batches());
+    let mut reader = findb::read_ipc_file(IPC_FILE)?;
+    eprintln!(
+        "Elapsed: {:?}. Num batches: {}",
+        start.elapsed(),
+        reader.num_batches()
+    );
+
+    let index = if let Err(_) = File::open(INDEX_FILE) {
+        eprintln!("Creating index and writing to file: {:?}", INDEX_FILE);
+        let start = SystemTime::now();
+        let index = Index::new(&mut reader, 0)?;
+        index.write_file(INDEX_FILE)?;
+        eprintln!("Elapsed: {:?}", start.elapsed());
+        index
+    } else {
+        eprintln!("Reading index file: {:?}", INDEX_FILE);
+        let start = SystemTime::now();
+        let index = Index::read_file(INDEX_FILE)?;
+        eprintln!("Elapsed: {:?}", start.elapsed());
+        reader.set_index(0)?;
+        index
+    };
 
     let query_list = vec![
         Query {
@@ -47,8 +68,8 @@ fn main() -> Result<()> {
 
     println!("Issuing query.");
     let start = SystemTime::now();
-    let min_batch = reader.binary_search(0, 20200612)?;
-    let max_batch = reader.binary_search(0, 20200618)? + 1;
+    let min_batch = index.index_of(20200612);
+    let max_batch = index.index_of(20200618) + 1;
 
     for i in min_batch..max_batch {
         reader.set_index(i)?;

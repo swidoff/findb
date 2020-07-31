@@ -8,5 +8,6 @@ edition = "2018"
 
 [dependencies]
 arrow = "*"
+byteorder="*"
 itertools = "*"
 memmap = "*"

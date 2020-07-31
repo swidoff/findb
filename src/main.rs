@@ -68,8 +68,8 @@ fn main() -> Result<()> {
 
     println!("Issuing query.");
     let start = SystemTime::now();
-    let min_batch = index.index_of(20200612);
-    let max_batch = index.index_of(20200618) + 1;
+    let min_batch = index.first_index_of(20200612);
+    let max_batch = index.last_index_of(20200618) + 1;
 
     for i in min_batch..max_batch {
         reader.set_index(i)?;

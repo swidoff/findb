@@ -7,18 +7,42 @@ use std::fs::File;
 use std::io;
 use std::io::{Read, Seek};
 
+/// Block Range Index
 pub struct Index {
-    block_dates: Vec<(u32, u32)>,
+    block_range: Vec<(u32, u32)>,
 }
 
 impl Index {
-    pub fn index_of(&self, value: u32) -> usize {
+    pub fn first_index_of(&self, value: u32) -> usize {
+        let mut i = self.any_index_of(value);
+
+        // Scan to the first block that contains the value.
+        while i > 0 && value >= self.block_range[i - 1].0 && value <= self.block_range[i - 1].1 {
+            i -= 1;
+        }
+        i
+    }
+
+    pub fn last_index_of(&self, value: u32) -> usize {
+        let mut i = self.any_index_of(value);
+
+        // Scan to the last block that contains the value.
+        while i < self.block_range.len() - 1
+            && value >= self.block_range[i + 1].0
+            && value <= self.block_range[i + 1].1
+        {
+            i += 1;
+        }
+        i
+    }
+
+    fn any_index_of(&self, value: u32) -> usize {
         let mut min: usize = 0;
-        let mut max = self.block_dates.len();
+        let mut max = self.block_range.len();
 
         let mut i: usize = (max + min) / 2;
         while min < max {
-            let (first_value, last_value) = self.block_dates[i];
+            let (first_value, last_value) = self.block_range[i];
             if value < first_value {
                 max = i - 1;
             } else if value > last_value {
@@ -49,13 +73,15 @@ impl Index {
             let last_value = column.value(column.len() - 1);
             block_dates.push((first_value, last_value))
         }
-        Ok(Index { block_dates })
+        Ok(Index {
+            block_range: block_dates,
+        })
     }
 
     pub fn write_file(&self, file_name: &str) -> io::Result<()> {
         let mut file = File::create(file_name)?;
-        file.write_u32::<BigEndian>(self.block_dates.len() as u32)?;
-        for (first_value, last_value) in self.block_dates.iter() {
+        file.write_u32::<BigEndian>(self.block_range.len() as u32)?;
+        for (first_value, last_value) in self.block_range.iter() {
             file.write_u32::<BigEndian>(*first_value)?;
             file.write_u32::<BigEndian>(*last_value)?;
         }
@@ -71,6 +97,8 @@ impl Index {
             let second_value = file.read_u32::<BigEndian>()?;
             block_dates.push((first_value, second_value));
         }
-        Ok(Index { block_dates })
+        Ok(Index {
+            block_range: block_dates,
+        })
     }
 }

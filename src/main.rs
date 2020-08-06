@@ -10,9 +10,9 @@ use arrow::util::pretty::print_batches;
 
 use findb::{Index, Query};
 
-const PRICING_FILE: &str = "content/prices-00.csv";
-const IPC_FILE: &str = "content/prices-00.ipc";
-const INDEX_FILE: &str = "content/prices-00.idx";
+const PRICING_FILE: &str = "/media/seth/external-500/prices.csv";
+const IPC_FILE: &str = "content/prices.ipc";
+const INDEX_FILE: &str = "content/prices.idx";
 
 fn main() -> Result<()> {
     if let Err(_) = File::open(IPC_FILE) {
@@ -26,7 +26,7 @@ fn main() -> Result<()> {
 
     let start = SystemTime::now();
     eprintln!("Reading from: {:?}", IPC_FILE);
-    let mut reader = findb::read_ipc_file(IPC_FILE)?;
+    let mut reader = findb::read_ipc_file_memmap(IPC_FILE)?;
     eprintln!(
         "Elapsed: {:?}. Num batches: {}",
         start.elapsed(),
@@ -80,7 +80,12 @@ fn main() -> Result<()> {
             }
         }
     }
-    eprintln!("Elapsed: {:?}", start.elapsed());
+    eprintln!(
+        "Elapsed: {:?}. Min Batch: {}, Max Batch: {}",
+        start.elapsed(),
+        min_batch,
+        max_batch
+    );
     Ok(())
 }
 

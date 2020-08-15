@@ -31,6 +31,12 @@ impl YearFileMonthlyBatchReader {
         let mut readers = HashMap::new();
         for entry in root_path.read_dir()? {
             let entry_path = entry?.path();
+            if let Some(extension) = entry_path.extension() {
+                if extension != "ipc" {
+                    continue;
+                }
+            }
+
             if let Some(year_str) = entry_path.file_stem().and_then(|f| f.to_str()) {
                 let year: Year = year_str
                     .parse::<Year>()
@@ -160,12 +166,14 @@ impl YearFileGenerator {
             Some(batch) if batch.year_month > year_month => {
                 panic!("Months should be monotonically increasing.")
             }
-            Some(batch) if batch.year_month > year_month => Some(batch.finish(&self.schema)?),
+            Some(batch) if batch.year_month < year_month => {
+                Some((batch.year_month, batch.finish(&self.schema)?))
+            }
             _ => None,
         };
 
-        if let Some(batch) = &last_batch {
-            let year = year_month / 100;
+        if let Some((batch_year_month, batch)) = &last_batch {
+            let year = batch_year_month / 100;
             self.write(year, batch)?;
             self.batch = None
         }
@@ -236,13 +244,12 @@ fn yyyymm(yyyymmdd: u32) -> u32 {
 
 /// Returns a vector that returns the start and end indexes of each YYYYMM date integer prefix in the supplied array.
 /// The end_index is exclusive.
+///
 fn year_month_index_ranges(array: &UInt32Array) -> Vec<(YearMonth, StartIndex, EndIndex)> {
     let min_year_month: u32 = yyyymm(array.value(0));
     let max_year_month: u32 = yyyymm(array.value(array.len() - 1));
     let mut year_month = min_year_month;
-
     let mut res: Vec<(YearMonth, StartIndex, EndIndex)> = Vec::new();
-    res.push((min_year_month, 0, array.len()));
 
     let slice: &[u32] = array.value_slice(0, array.len());
     while year_month <= max_year_month {
@@ -327,21 +334,17 @@ mod tests {
 
         let mut ipc_reader =
             YearFileMonthlyBatchReader::try_new(root).expect("Failed to read IPC files");
-        assert_eq!(
-            ipc_reader.readers.len(),
-            2,
-            "Expected two years in the readers hash map."
-        );
+        assert_eq!(ipc_reader.readers.len(), 10, "Years of readers.");
 
         for (year, year_reader) in ipc_reader.readers.iter_mut() {
-            for month in 0..12 {
+            for month in 1..13 {
                 let batch = year_reader
                     .next_batch()
                     .expect("Failed to read batch.")
                     .expect("Batch was None");
 
                 // Assert all rows are for the year/month.
-                let date_column: &UInt32Array = get_column(&batch, 1);
+                let date_column: &UInt32Array = get_column(&batch, 0);
                 let dates_within_month = filter::filter(
                     date_column,
                     &boolean::and(
@@ -361,8 +364,8 @@ mod tests {
                 );
 
                 // Assert all five tickers are present.
-                let asset_column: &StringArray = get_column(&batch, 2);
-                let tickers = vec!["AAPL", "AMZN", "GOOG", "MSFT", "NTFZ", "30303M10"];
+                let asset_column: &StringArray = get_column(&batch, 1);
+                let tickers = vec!["AAPL", "AMZN", "GOOG", "MSFT"]; // "NTFZ", "30303M10"];
                 for ticker in tickers.into_iter() {
                     let rows_for_ticker = filter::filter(
                         asset_column,

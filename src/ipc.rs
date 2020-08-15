@@ -17,9 +17,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 type Year = u32;
-type Month = u32;
 type YearMonth = u32;
-type Index = usize;
+type StartIndex = usize;
+type EndIndex = usize;
 
 pub struct YearFileMonthlyBatchReader {
     readers: HashMap<Year, FileReader<File>>,
@@ -59,7 +59,7 @@ pub fn write_csv_to_yearly_ipc_files_monthly_batches<T: Read>(
     let mut gen = YearFileGenerator::new(&csv_reader.schema(), root);
     while let Ok(Some(record_batch)) = csv_reader.next() {
         let date_column: &UInt32Array = get_column(&record_batch, 0);
-        let year_month_indexes = month_indexes(date_column);
+        let year_month_indexes = year_month_index_ranges(date_column);
 
         for (year_month, start_index, end_index) in year_month_indexes {
             gen.append(year_month, &record_batch, start_index, end_index)?;
@@ -108,11 +108,12 @@ impl YearMonthBatch {
         end_index: usize,
     ) -> Result<()> {
         assert_eq!(record_batch.num_columns(), self.batch.len());
+        let length = end_index - start_index;
 
         for i in 0..record_batch.num_columns() {
             // Obtain a slice of the column from start_index to end_index.
             let source_column = record_batch.column(i);
-            let source_slice = [source_column.slice(start_index, end_index).data()];
+            let source_slice = [source_column.slice(start_index, length).data()];
             self.batch[i].append_data(&source_slice[..])?;
         }
 
@@ -233,18 +234,22 @@ fn yyyymm(yyyymmdd: u32) -> u32 {
     yyyymmdd / 100
 }
 
-fn month_indexes(array: &UInt32Array) -> Vec<(Month, Index, Index)> {
-    let min_month: u32 = yyyymm(array.value(0));
-    let max_month: u32 = yyyymm(array.value(array.len() - 1));
-    let mut res: Vec<(Month, Index, Index)> = Vec::new();
-    res.push((min_month, 0, array.len()));
+/// Returns a vector that returns the start and end indexes of each YYYYMM date integer prefix in the supplied array.
+/// The end_index is exclusive.
+fn year_month_index_ranges(array: &UInt32Array) -> Vec<(YearMonth, StartIndex, EndIndex)> {
+    let min_year_month: u32 = yyyymm(array.value(0));
+    let max_year_month: u32 = yyyymm(array.value(array.len() - 1));
+    let mut year_month = min_year_month;
+
+    let mut res: Vec<(YearMonth, StartIndex, EndIndex)> = Vec::new();
+    res.push((min_year_month, 0, array.len()));
 
     let slice: &[u32] = array.value_slice(0, array.len());
-    for month in (min_month + 1)..(max_month + 1) {
-        let first_day = month * 100 + 1;
-        let index = match slice.binary_search(&first_day) {
+    while year_month <= max_year_month {
+        let first_day = year_month * 100 + 1;
+        let start_index = match slice.binary_search(&first_day) {
             Ok(index) => {
-                // The binary search finds a match, but not necessarily the first match
+                // The binary search finds a match, but not necessarily the first match, so rollback to the first.
                 let mut i = index;
                 while i > 0 && slice[i - 1] == first_day {
                     i -= 1;
@@ -253,9 +258,22 @@ fn month_indexes(array: &UInt32Array) -> Vec<(Month, Index, Index)> {
             }
             Err(index) => index,
         };
-        res.push((month, index, array.len()))
+        res.push((year_month, start_index, array.len()));
+
+        // Advance year/month.
+        let mut year = year_month / 100;
+        let mut month = year_month % 100;
+        if month == 12 {
+            year += 1;
+            month = 1;
+        } else {
+            month += 1
+        }
+        year_month = year * 100 + month;
     }
 
+    // Set the end index to be the start index of the next year_month. The last element will continue to have the
+    // array length as its end index.
     for i in 0..(res.len() - 1) {
         res[i].2 = res[i + 1].1
     }

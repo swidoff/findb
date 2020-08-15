@@ -8,7 +8,7 @@ use arrow::datatypes::{DataType, SchemaRef};
 use arrow::error::{ArrowError, Result};
 use arrow::ipc::reader::FileReader;
 use arrow::ipc::writer::FileWriter;
-use arrow::record_batch::RecordBatch;
+use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::fs::File;
@@ -54,6 +54,18 @@ impl YearFileMonthlyBatchReader {
             )))
         } else {
             Ok(YearFileMonthlyBatchReader { readers })
+        }
+    }
+
+    pub fn read(&mut self, year_month: YearMonth) -> Result<Option<RecordBatch>> {
+        let year = year_month / 100;
+        let month = year_month % 100;
+        let index = (month - 1) as usize;
+        if let Some(reader) = self.readers.get_mut(&year) {
+            reader.set_index(index)?;
+            reader.next_batch()
+        } else {
+            Ok(None)
         }
     }
 }
@@ -248,11 +260,10 @@ fn yyyymm(yyyymmdd: u32) -> u32 {
 fn year_month_index_ranges(array: &UInt32Array) -> Vec<(YearMonth, StartIndex, EndIndex)> {
     let min_year_month: u32 = yyyymm(array.value(0));
     let max_year_month: u32 = yyyymm(array.value(array.len() - 1));
-    let mut year_month = min_year_month;
     let mut res: Vec<(YearMonth, StartIndex, EndIndex)> = Vec::new();
 
     let slice: &[u32] = array.value_slice(0, array.len());
-    while year_month <= max_year_month {
+    for year_month in YearMonthRange::new(min_year_month, max_year_month) {
         let first_day = year_month * 100 + 1;
         let start_index = match slice.binary_search(&first_day) {
             Ok(index) => {
@@ -266,17 +277,6 @@ fn year_month_index_ranges(array: &UInt32Array) -> Vec<(YearMonth, StartIndex, E
             Err(index) => index,
         };
         res.push((year_month, start_index, array.len()));
-
-        // Advance year/month.
-        let mut year = year_month / 100;
-        let mut month = year_month % 100;
-        if month == 12 {
-            year += 1;
-            month = 1;
-        } else {
-            month += 1
-        }
-        year_month = year * 100 + month;
     }
 
     // Set the end index to be the start index of the next year_month. The last element will continue to have the
@@ -288,7 +288,47 @@ fn year_month_index_ranges(array: &UInt32Array) -> Vec<(YearMonth, StartIndex, E
     res
 }
 
-fn get_column<T: 'static>(batch: &RecordBatch, index: usize) -> &T {
+pub struct YearMonthRange {
+    start_year_month: YearMonth,
+    end_year_month: YearMonth,
+    current_year_month: YearMonth,
+}
+
+impl YearMonthRange {
+    pub fn new(start_year_month: YearMonth, end_year_month: YearMonth) -> YearMonthRange {
+        YearMonthRange {
+            start_year_month,
+            end_year_month,
+            current_year_month: start_year_month,
+        }
+    }
+}
+
+impl Iterator for YearMonthRange {
+    type Item = YearMonth;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_year_month <= self.end_year_month {
+            let res = self.current_year_month;
+
+            // Advance current year_month.
+            let mut year = self.current_year_month / 100;
+            let mut month = self.current_year_month % 100;
+            if month == 12 {
+                year += 1;
+                month = 1;
+            } else {
+                month += 1
+            }
+            self.current_year_month = year * 100 + month;
+            Some(res)
+        } else {
+            None
+        }
+    }
+}
+
+pub fn get_column<T: 'static>(batch: &RecordBatch, index: usize) -> &T {
     batch
         .column(index)
         .as_any()
@@ -308,8 +348,6 @@ fn new_builder(data_type: &DataType, capacity: usize) -> Result<Box<dyn ArrayBui
         ))),
     }
 }
-
-/// OLD API
 
 #[cfg(test)]
 mod tests {
@@ -383,25 +421,4 @@ mod tests {
             }
         }
     }
-}
-
-pub fn write_ipc_file<T: Read>(reader: &mut csv::Reader<T>, file_name: &str) -> Result<()> {
-    let ipc_file = File::create(file_name)?;
-    let mut writer = FileWriter::try_new(ipc_file, &reader.schema())?;
-    while let Ok(Some(batch)) = reader.next() {
-        writer.write(&batch)?;
-    }
-    writer.finish()?;
-    Ok(())
-}
-
-pub fn read_ipc_file(file_name: &str) -> Result<FileReader<File>> {
-    let ipc_file = File::open(file_name)?;
-    FileReader::try_new(ipc_file)
-}
-
-pub fn read_ipc_file_memmap(file_name: &str) -> Result<FileReader<MmapFile>> {
-    let ipc_file = File::open(file_name)?;
-    let mmap_file = MmapFile::new(ipc_file);
-    FileReader::try_new(mmap_file)
 }

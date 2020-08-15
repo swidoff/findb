@@ -8,7 +8,7 @@ use arrow::error::Result;
 use arrow::record_batch::RecordBatchReader;
 use arrow::util::pretty::print_batches;
 
-use findb::{Index, Query};
+use findb::{pricing_schema, Index, Query};
 
 const PRICING_FILE: &str = "/media/seth/external-500/prices.csv";
 const IPC_FILE: &str = "content/prices.ipc";
@@ -87,56 +87,6 @@ fn main() -> Result<()> {
         max_batch
     );
     Ok(())
-}
-
-fn pricing_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("date", DataType::UInt32, false),
-        Field::new("asset_id", DataType::Utf8, false),
-        Field::new("infocode", DataType::UInt32, false),
-        Field::new("eff_start", DataType::UInt64, false),
-        Field::new("eff_end", DataType::UInt64, false),
-        Field::new("currency", DataType::Utf8, false),
-        Field::new("exchintcode", DataType::Utf8, false),
-        Field::new("fx_rate_usd", DataType::Float64, false),
-        Field::new("split_adj_factor", DataType::Float64, false),
-        Field::new("open", DataType::Float64, false),
-        Field::new("open_usd", DataType::Float64, false),
-        Field::new("open_adj", DataType::Float64, false),
-        Field::new("open_adj_usd", DataType::Float64, false),
-        Field::new("high", DataType::Float64, false),
-        Field::new("high_usd", DataType::Float64, false),
-        Field::new("high_adj", DataType::Float64, false),
-        Field::new("high_adj_usd", DataType::Float64, false),
-        Field::new("low", DataType::Float64, false),
-        Field::new("low_usd", DataType::Float64, false),
-        Field::new("low_adj", DataType::Float64, false),
-        Field::new("low_adj_usd", DataType::Float64, false),
-        Field::new("close", DataType::Float64, false),
-        Field::new("close_usd", DataType::Float64, false),
-        Field::new("close_adj", DataType::Float64, false),
-        Field::new("close_adj_usd", DataType::Float64, false),
-        Field::new("volume", DataType::Float64, false),
-        Field::new("volume_adj", DataType::Float64, false),
-        Field::new("bid", DataType::Float64, false),
-        Field::new("bid_usd", DataType::Float64, false),
-        Field::new("bid_adj", DataType::Float64, false),
-        Field::new("bid_adj_usd", DataType::Float64, false),
-        Field::new("ask", DataType::Float64, false),
-        Field::new("ask_usd", DataType::Float64, false),
-        Field::new("ask_adj", DataType::Float64, false),
-        Field::new("ask_adj_usd", DataType::Float64, false),
-        Field::new("vwap", DataType::Float64, false),
-        Field::new("vwap_usd", DataType::Float64, false),
-        Field::new("vwap_adj", DataType::Float64, false),
-        Field::new("vwap_adj_usd", DataType::Float64, false),
-        Field::new("return_index", DataType::Float64, false),
-        Field::new("return_index_usd", DataType::Float64, false),
-        Field::new("shares", DataType::Float64, false),
-        Field::new("shares_adj", DataType::Float64, false),
-        Field::new("marketcap", DataType::Float64, false),
-        Field::new("marketcap_usd", DataType::Float64, false),
-    ])
 }
 
 fn read_pricing_file(file: &str, batch_size: usize) -> Reader<File> {

@@ -6,7 +6,6 @@ use arrow::compute::kernels::{boolean, comparison, filter};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::Result;
 use arrow::record_batch::RecordBatch;
-use itertools::Itertools;
 
 pub struct Query {
     pub build_date: u32,
@@ -137,10 +136,9 @@ mod tests {
     use super::*;
     use crate::ipc::write_csv_to_yearly_ipc_files_monthly_batches;
     use crate::pricing_schema;
-    use arrow::array::StringArray;
     use arrow::csv;
-    use arrow::record_batch::RecordBatchReader;
-    use arrow::util::pretty::{pretty_format_batches, print_batches};
+    use arrow::util::pretty::pretty_format_batches;
+    use itertools::Itertools;
     use std::fs::File;
 
     #[test]

@@ -1,8 +1,6 @@
-use crate::MmapFile;
 use arrow::array::{
     ArrayBuilder, Float64Builder, StringBuilder, UInt32Array, UInt32Builder, UInt64Builder,
 };
-use arrow::compute::kernels::{boolean, comparison, filter};
 use arrow::csv;
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::error::{ArrowError, Result};
@@ -289,7 +287,6 @@ fn year_month_index_ranges(array: &UInt32Array) -> Vec<(YearMonth, StartIndex, E
 }
 
 pub struct YearMonthRange {
-    start_year_month: YearMonth,
     end_year_month: YearMonth,
     current_year_month: YearMonth,
 }
@@ -297,7 +294,6 @@ pub struct YearMonthRange {
 impl YearMonthRange {
     pub fn new(start_year_month: YearMonth, end_year_month: YearMonth) -> YearMonthRange {
         YearMonthRange {
-            start_year_month,
             end_year_month,
             current_year_month: start_year_month,
         }
@@ -354,6 +350,7 @@ mod tests {
     use super::*;
     use crate::pricing_schema;
     use arrow::array::StringArray;
+    use arrow::compute::kernels::{boolean, comparison, filter};
     use arrow::record_batch::RecordBatchReader;
 
     #[test]

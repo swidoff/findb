@@ -12,8 +12,8 @@ use findb::{
     YearFileMonthlyBatchReader,
 };
 
-// const PRICING_FILE: &str = "/media/seth/external-500/prices.csv";
-const PRICING_FILE: &str = "tests/content/faangm.csv";
+const PRICING_FILE: &str = "/media/seth/external-500/prices.csv";
+// const PRICING_FILE: &str = "tests/content/faangm.csv";
 const ROOT_DIR: &str = "content/ds_pricing";
 
 fn main() -> Result<()> {

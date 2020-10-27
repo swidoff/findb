@@ -13,6 +13,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 type Year = u32;
 type YearMonth = u32;
@@ -60,8 +61,19 @@ impl YearFileMonthlyBatchReader {
         let month = year_month % 100;
         let index = (month - 1) as usize;
         if let Some(reader) = self.readers.get_mut(&year) {
+            let start = SystemTime::now();
             reader.set_index(index)?;
-            reader.next_batch()
+            eprintln!(
+                "YearFileMonthlyBatchReader::read:set_index: {:?}",
+                start.elapsed()
+            );
+            let start = SystemTime::now();
+            let res = reader.next_batch();
+            eprintln!(
+                "YearFileMonthlyBatchReader::read:next_batch: {:?}",
+                start.elapsed()
+            );
+            res
         } else {
             Ok(None)
         }

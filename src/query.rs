@@ -6,6 +6,7 @@ use arrow::compute::kernels::{boolean, comparison, filter};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::Result;
 use arrow::record_batch::RecordBatch;
+use std::time::SystemTime;
 
 pub struct Query {
     pub build_date: u32,
@@ -52,6 +53,7 @@ impl Query {
         eff_end_index: usize,
         value_index: usize,
     ) -> Result<Option<RecordBatch>> {
+        eprintln!("batch of {} rows", batch.num_rows());
         let date_column: &UInt32Array = get_column(&batch, date_index);
         let fid_column: &StringArray = get_column(&batch, fid_index);
         let eff_start_column: &UInt64Array = get_column(&batch, eff_start_index);
@@ -62,19 +64,24 @@ impl Query {
         let date_range_query = self.query_date_range(date_column)?;
         let eff_date_query = self.query_eff_timestamp(eff_start_column, eff_end_column)?;
 
+        let start = SystemTime::now();
         let selection_query = match asset_id_query {
             None => date_range_query,
             Some(asset_id_query) => boolean::and(&date_range_query, &asset_id_query)?,
         };
         let condition = boolean::and(&selection_query, &eff_date_query)?;
+        eprintln!("combine_criteria: {:?}", start.elapsed());
 
+        let start = SystemTime::now();
         let res_date = filter::filter(date_column, &condition)?;
         if res_date.len() == 0 {
             Ok(None)
         } else {
             let res_fid = filter::filter(fid_column, &condition)?;
             let res_value = filter::filter(value_column, &condition)?;
+            eprintln!("filter: {:?}", start.elapsed());
 
+            let start = SystemTime::now();
             let len = res_date.len();
             let mut build_date_column_builder = UInt32Array::builder(len);
             for _ in 0..len {
@@ -92,22 +99,28 @@ impl Query {
                 Field::new("data_date", DataType::UInt32, false),
                 Field::new(&value_column_name[..], DataType::Float64, true),
             ]);
-            RecordBatch::try_new(
+            let res = RecordBatch::try_new(
                 Arc::new(res_schema),
                 vec![res_build_date, res_fid, res_date, res_value],
             )
-            .map(|b| Some(b))
+            .map(|b| Some(b));
+            eprintln!("build batch: {:?}", start.elapsed());
+            res
         }
     }
 
     fn query_date_range(&self, date_column: &UInt32Array) -> Result<BooleanArray> {
-        boolean::and(
+        let start = SystemTime::now();
+        let res = boolean::and(
             &comparison::gt_eq_scalar(date_column, self.start_date)?,
             &comparison::lt_eq_scalar(date_column, self.end_date)?,
-        )
+        );
+        eprintln!("Query::query_date_range: {:?}", start.elapsed());
+        res
     }
 
     fn query_asset_ids(&self, asset_id_column: &StringArray) -> Result<Option<BooleanArray>> {
+        let start = SystemTime::now();
         let mut res: Option<BooleanArray> = Option::None;
         for asset_id in self.asset_ids.iter() {
             let asset_id_query = comparison::eq_utf8_scalar(asset_id_column, &asset_id[..])?;
@@ -116,6 +129,7 @@ impl Query {
                 Some(or_cond) => boolean::or(&or_cond, &asset_id_query)?,
             })
         }
+        eprintln!("Query::query_asset_ids: {:?}", start.elapsed());
         Ok(res)
     }
 
@@ -124,10 +138,13 @@ impl Query {
         eff_start_column: &UInt64Array,
         eff_end_column: &UInt64Array,
     ) -> Result<BooleanArray> {
-        boolean::and(
+        let start = SystemTime::now();
+        let res = boolean::and(
             &comparison::lt_eq_scalar(eff_start_column, self.eff_timestamp)?,
             &comparison::gt_eq_scalar(eff_end_column, self.eff_timestamp)?,
-        )
+        );
+        eprintln!("Query::query_eff_timestamp: {:?}", start.elapsed());
+        res
     }
 }
 

@@ -11,6 +11,10 @@ trait Node {
     fn find_leaf(&self, key: u32) -> Option<&Leaf>;
     fn insert(&mut self, key: u32, value: u32) -> InsertResult;
 
+    fn count_nodes(&self) -> (usize, usize) {
+        return (1, 0);
+    }
+
     fn as_internal(&mut self) -> Option<&mut InternalNode> {
         return None;
     }
@@ -38,18 +42,20 @@ impl Node for Leaf {
                     InsertResult::SuccessNoSplit
                 } else {
                     let midpoint_index = self.kv.len() / 2;
+                    let midpoint_value = self.kv[midpoint_index].1;
 
                     // Allocate new kv for split node, copying from the midpoint of this node's kv.
                     let mut split_kv = Vec::with_capacity(self.kv.capacity());
                     for i in midpoint_index..self.kv.len() {
-                        split_kv.push(self.kv.remove(i))
+                        split_kv.push(self.kv[i])
                     }
 
                     // Truncate this kv from the midpoint and push the new key and value.
+                    self.kv.truncate(midpoint_index);
                     self.kv.push((key, value));
 
                     InsertResult::SuccessSplit {
-                        midpoint_key: self.kv[midpoint_index].1,
+                        midpoint_key: midpoint_value,
                         split_node: Box::new(Leaf { kv: split_kv }),
                     }
                 }
@@ -104,10 +110,10 @@ impl Node for InternalNode {
                     let mut split_keys = Vec::with_capacity(self.keys.capacity());
                     let mut split_pointers = Vec::with_capacity(self.pointers.capacity());
                     for i in (midpoint_index + 1)..self.keys.len() {
-                        split_keys.push(self.keys.remove(i))
+                        split_keys.push(self.keys[i])
                     }
-                    for i in (midpoint_index + 1)..self.pointers.len() {
-                        split_pointers.push(self.pointers.remove(i))
+                    for i in ((midpoint_index + 1)..self.pointers.len()).rev() {
+                        split_pointers[i] = self.pointers.remove(i)
                     }
 
                     // Truncate this kv from the midpoint and push the new key and value.
@@ -129,6 +135,17 @@ impl Node for InternalNode {
         }
     }
 
+    fn count_nodes(&self) -> (usize, usize) {
+        let mut leaf_count = 0;
+        let mut internal_count = 1;
+        for child in self.pointers.iter() {
+            let (inner_leaf_count, inner_internal_count) = child.count_nodes();
+            leaf_count += inner_leaf_count;
+            internal_count += inner_internal_count;
+        }
+        (leaf_count, internal_count)
+    }
+
     fn as_internal(&mut self) -> Option<&mut InternalNode> {
         Some(self)
     }
@@ -147,6 +164,10 @@ impl BTree {
                 kv: Vec::with_capacity(capacity),
             })),
         }
+    }
+
+    pub fn count_nodes(&self) -> (usize, usize) {
+        self.root.as_ref().map_or((0, 0), |root| root.count_nodes())
     }
 
     pub fn lookup(&self, key: u32) -> Option<u32> {
@@ -189,4 +210,39 @@ impl BTree {
     // pub fn delete(&self, key: u32) -> bool {
     //     return false;
     // }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::btree::mem::BTree;
+
+    #[test]
+    fn leaf_node_insert_no_split() {
+        let mut btree = BTree::new(3);
+        btree.insert(10, 10);
+        btree.insert(13, 13);
+        btree.insert(15, 15);
+
+        assert_eq!((1, 0), btree.count_nodes());
+        assert_eq!(Some(10), btree.lookup(10));
+        assert_eq!(Some(13), btree.lookup(13));
+        assert_eq!(Some(15), btree.lookup(15));
+        assert_eq!(None, btree.lookup(9));
+    }
+
+    #[test]
+    fn leaf_node_split() {
+        let mut btree = BTree::new(3);
+        btree.insert(10, 10);
+        btree.insert(13, 13);
+        btree.insert(15, 15);
+        btree.insert(11, 11);
+
+        assert_eq!((2, 1), btree.count_nodes());
+        assert_eq!(Some(10), btree.lookup(10));
+        assert_eq!(Some(11), btree.lookup(11));
+        assert_eq!(Some(13), btree.lookup(13));
+        assert_eq!(Some(15), btree.lookup(15));
+        assert_eq!(None, btree.lookup(9));
+    }
 }

@@ -2,7 +2,7 @@ enum InsertResult {
     SuccessNoSplit,
     Duplicate,
     SuccessSplit {
-        midpoint_key: u32,
+        split_key: u32,
         split_node: Box<dyn Node>,
     },
 }
@@ -34,7 +34,8 @@ impl Node for Leaf {
     }
 
     fn insert(&mut self, key: u32, value: u32) -> InsertResult {
-        match self.kv.binary_search_by_key(&key, |value| value.1) {
+        let search_result = self.kv.binary_search_by_key(&key, |value| value.1);
+        match search_result {
             Ok(_) => InsertResult::Duplicate,
             Err(index) => {
                 if self.kv.len() < self.kv.capacity() {
@@ -52,11 +53,17 @@ impl Node for Leaf {
 
                     // Truncate this kv from the midpoint and push the new key and value.
                     self.kv.truncate(midpoint_index);
-                    self.kv.push((key, value));
+                    let mut split_leaf = Leaf { kv: split_kv };
+
+                    if key < midpoint_value {
+                        self.insert(key, value);
+                    } else {
+                        split_leaf.insert(key, value);
+                    }
 
                     InsertResult::SuccessSplit {
-                        midpoint_key: midpoint_value,
-                        split_node: Box::new(Leaf { kv: split_kv }),
+                        split_key: midpoint_value,
+                        split_node: Box::new(split_leaf),
                     }
                 }
             }
@@ -85,6 +92,12 @@ impl InternalNode {
             Err(index) => index,
         }
     }
+
+    fn insert_key_and_pointer(&mut self, key: u32, pointer: Box<dyn Node>) {
+        let idx = self.index_for(key);
+        self.keys.insert(idx, key);
+        self.pointers.insert(idx + 1, pointer);
+    }
 }
 
 impl Node for InternalNode {
@@ -94,40 +107,47 @@ impl Node for InternalNode {
 
     fn insert(&mut self, key: u32, value: u32) -> InsertResult {
         let insert_index = self.index_for(key);
-        match self.pointers[insert_index].insert(key, value) {
+        let result = self.pointers[insert_index].insert(key, value);
+        match result {
             InsertResult::SuccessSplit {
-                midpoint_key,
+                split_key,
                 split_node,
             } => {
-                let midpoint_index = self.index_for(midpoint_key);
-
                 if self.keys.len() < self.keys.capacity() {
-                    self.keys.insert(midpoint_index, midpoint_key);
-                    self.pointers.insert(midpoint_index + 1, split_node);
+                    self.insert_key_and_pointer(split_key, split_node);
                     InsertResult::SuccessNoSplit
                 } else {
-                    // Allocate new kv for split node, copying from the midpoint of this node's kv.
-                    let mut split_keys = Vec::with_capacity(self.keys.capacity());
-                    let mut split_pointers = Vec::with_capacity(self.pointers.capacity());
-                    for i in (midpoint_index + 1)..self.keys.len() {
-                        split_keys.push(self.keys[i])
-                    }
-                    for i in ((midpoint_index + 1)..self.pointers.len()).rev() {
-                        split_pointers[i] = self.pointers.remove(i)
-                    }
+                    let midpoint_index = self.keys.len() / 2;
+                    let midpoint_key = self.keys[midpoint_index];
 
-                    // Truncate this kv from the midpoint and push the new key and value.
-                    self.keys.truncate(midpoint_index - 1);
-                    self.pointers.truncate(midpoint_index);
-                    self.keys.push(midpoint_key);
-                    self.pointers.push(split_node);
+                    // Allocate new kv for split node, copying from the midpoint of this node's kv.
+                    let mut right_keys = Vec::with_capacity(self.keys.capacity());
+                    let mut right_pointers = Vec::with_capacity(self.pointers.capacity());
+                    for i in (midpoint_index + 1)..self.keys.len() {
+                        right_keys.push(self.keys[i])
+                    }
+                    right_pointers.extend(
+                        self.pointers
+                            .drain((midpoint_index + 1)..self.pointers.len()),
+                    );
+
+                    self.keys.truncate(midpoint_index);
+                    self.pointers.truncate(midpoint_index + 1);
+
+                    let mut right_node = InternalNode {
+                        keys: right_keys,
+                        pointers: right_pointers,
+                    };
+
+                    if split_key < midpoint_key {
+                        self.insert_key_and_pointer(split_key, split_node)
+                    } else {
+                        right_node.insert_key_and_pointer(split_key, split_node)
+                    }
 
                     InsertResult::SuccessSplit {
-                        midpoint_key: self.keys[midpoint_index],
-                        split_node: Box::new(InternalNode {
-                            keys: split_keys,
-                            pointers: split_pointers,
-                        }),
+                        split_key: midpoint_key,
+                        split_node: Box::new(right_node),
                     }
                 }
             }
@@ -181,10 +201,11 @@ impl BTree {
     // }
 
     pub fn insert(&mut self, key: u32, value: u32) -> bool {
-        match self.root.as_mut().map(|root| root.insert(key, value)) {
+        let result = self.root.as_mut().map(|root| root.insert(key, value));
+        match result {
             Some(InsertResult::SuccessNoSplit) => true,
             Some(InsertResult::SuccessSplit {
-                midpoint_key,
+                split_key: midpoint_key,
                 split_node,
             }) => {
                 if let Some(old_root) = self.root.take() {
@@ -231,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn leaf_node_split() {
+    fn leaf_node_insert_split() {
         let mut btree = BTree::new(3);
         btree.insert(10, 10);
         btree.insert(13, 13);
@@ -244,5 +265,17 @@ mod tests {
         assert_eq!(Some(13), btree.lookup(13));
         assert_eq!(Some(15), btree.lookup(15));
         assert_eq!(None, btree.lookup(9));
+    }
+
+    #[test]
+    fn internal_node_insert_split() {
+        let mut btree = BTree::new(3);
+        for i in (0..13).step_by(2) {
+            btree.insert(i, i);
+        }
+        assert_eq!((5, 3), btree.count_nodes());
+        for i in (0..13).step_by(2) {
+            assert_eq!(Some(i), btree.lookup(i));
+        }
     }
 }

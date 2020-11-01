@@ -139,7 +139,7 @@ impl Node for Leaf {
                         .kv
                         .extend(self.kv.drain(midpoint_index..self.kv.len()));
 
-                    // Insert the the new key and value nto the correct node.
+                    // Insert the the new key and value into the correct node.
                     if key < midpoint_key {
                         self.insert(key, value);
                     } else {
@@ -235,6 +235,7 @@ impl Node for InternalNode {
                             .drain((midpoint_index + 1)..self.pointers.len()),
                     );
 
+                    // Remove the midpoint, since it's being promoted to the parent node.
                     self.keys.truncate(midpoint_index);
                     self.pointers.truncate(midpoint_index + 1);
 

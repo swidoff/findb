@@ -7,9 +7,95 @@ enum InsertResult {
     },
 }
 
+struct GraphViz {
+    node_counter: usize,
+    lines: Vec<String>,
+}
+
+impl GraphViz {
+    fn new() -> GraphViz {
+        GraphViz {
+            node_counter: 0,
+            lines: Vec::new(),
+        }
+    }
+
+    fn add_leaf_node(&mut self, kv: &Vec<(u32, u32)>) -> usize {
+        let node_id = self.node_counter;
+        let mut line = format!("struct{} [label=\"", node_id);
+        line.push_str("{{");
+        for i in 0..kv.capacity() {
+            if i > 0 {
+                line.push('|')
+            }
+            if i < kv.len() {
+                line.push_str(kv[i].0.to_string().as_str());
+            }
+        }
+        line.push_str("}|{");
+        for i in 0..kv.capacity() {
+            if i > 0 {
+                line.push('|')
+            }
+            if i < kv.len() {
+                line.push_str(kv[i].1.to_string().as_str());
+            }
+        }
+        line.push_str("}}\"];");
+        self.lines.push(line);
+        self.node_counter += 1;
+        node_id
+    }
+
+    fn add_internal_node(&mut self, keys: &Vec<u32>) -> usize {
+        let node_id = self.node_counter;
+        let mut line = format!("struct{} [label=\"{{{{", node_id);
+        for i in 0..keys.capacity() {
+            if i > 0 {
+                line.push('|')
+            }
+            if i < keys.len() {
+                line.push_str(keys[i].to_string().as_str());
+            }
+        }
+        line.push_str("}|{");
+        for i in 0..(keys.capacity() + 1) {
+            if i > 0 {
+                line.push('|')
+            }
+            line.push_str("<p");
+            line.push_str(i.to_string().as_str());
+            line.push('>');
+        }
+        line.push_str("}}\"];");
+        self.lines.push(line);
+        self.node_counter += 1;
+        node_id
+    }
+
+    fn add_edge(&mut self, node_id: usize, pointer_idx: usize, target_id: usize) {
+        self.lines.push(format!(
+            "struct{node_id}:p{pointer_idx} -> struct{target_id}",
+            node_id = node_id,
+            pointer_idx = pointer_idx,
+            target_id = target_id
+        ))
+    }
+
+    fn print(&self) {
+        println!("digraph structs {{");
+        println!("\tnode [shape=record]");
+        for line in self.lines.iter() {
+            println!("\t{}", line);
+        }
+        println!("}}");
+    }
+}
+
 trait Node {
     fn find_leaf(&self, key: u32) -> Option<&Leaf>;
     fn insert(&mut self, key: u32, value: u32) -> InsertResult;
+    fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize;
 
     fn count_nodes(&self) -> (usize, usize) {
         return (1, 0);
@@ -45,29 +131,32 @@ impl Node for Leaf {
                     let midpoint_index = self.kv.len() / 2;
                     let midpoint_value = self.kv[midpoint_index].1;
 
-                    // Allocate new kv for split node, copying from the midpoint of this node's kv.
-                    let mut split_kv = Vec::with_capacity(self.kv.capacity());
-                    for i in midpoint_index..self.kv.len() {
-                        split_kv.push(self.kv[i])
-                    }
+                    // Allocate new kv for split node, moving from the midpoint of this node's kv.
+                    let mut new_leaf = Leaf {
+                        kv: Vec::with_capacity(self.kv.capacity()),
+                    };
+                    new_leaf
+                        .kv
+                        .extend(self.kv.drain(midpoint_index..self.kv.len()));
 
-                    // Truncate this kv from the midpoint and push the new key and value.
-                    self.kv.truncate(midpoint_index);
-                    let mut split_leaf = Leaf { kv: split_kv };
-
+                    // Insert the the new key and value nto the correct node.
                     if key < midpoint_value {
                         self.insert(key, value);
                     } else {
-                        split_leaf.insert(key, value);
+                        new_leaf.insert(key, value);
                     }
 
                     InsertResult::SuccessSplit {
                         split_key: midpoint_value,
-                        split_node: Box::new(split_leaf),
+                        split_node: Box::new(new_leaf),
                     }
                 }
             }
         }
+    }
+
+    fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize {
+        graphviz.add_leaf_node(&self.kv)
     }
 }
 
@@ -120,13 +209,16 @@ impl Node for InternalNode {
                     let midpoint_index = self.keys.len() / 2;
                     let midpoint_key = self.keys[midpoint_index];
 
-                    // Allocate new kv for split node, copying from the midpoint of this node's kv.
-                    let mut right_keys = Vec::with_capacity(self.keys.capacity());
-                    let mut right_pointers = Vec::with_capacity(self.pointers.capacity());
-                    for i in (midpoint_index + 1)..self.keys.len() {
-                        right_keys.push(self.keys[i])
-                    }
-                    right_pointers.extend(
+                    let mut new_node = InternalNode {
+                        keys: Vec::with_capacity(self.keys.capacity()),
+                        pointers: Vec::with_capacity(self.pointers.capacity()),
+                    };
+
+                    // Allocate new kv for split node, moving from the midpoint of this node's kv.
+                    new_node
+                        .keys
+                        .extend(self.keys.drain((midpoint_index + 1)..self.keys.len()));
+                    new_node.pointers.extend(
                         self.pointers
                             .drain((midpoint_index + 1)..self.pointers.len()),
                     );
@@ -134,25 +226,29 @@ impl Node for InternalNode {
                     self.keys.truncate(midpoint_index);
                     self.pointers.truncate(midpoint_index + 1);
 
-                    let mut right_node = InternalNode {
-                        keys: right_keys,
-                        pointers: right_pointers,
-                    };
-
                     if split_key < midpoint_key {
                         self.insert_key_and_pointer(split_key, split_node)
                     } else {
-                        right_node.insert_key_and_pointer(split_key, split_node)
+                        new_node.insert_key_and_pointer(split_key, split_node)
                     }
 
                     InsertResult::SuccessSplit {
                         split_key: midpoint_key,
-                        split_node: Box::new(right_node),
+                        split_node: Box::new(new_node),
                     }
                 }
             }
             x => x,
         }
+    }
+
+    fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize {
+        let node_id = graphviz.add_internal_node(&self.keys);
+        for i in 0..self.pointers.len() {
+            let target_id = self.pointers[i].add_to_graph_vis(graphviz);
+            graphviz.add_edge(node_id, i, target_id);
+        }
+        return node_id;
     }
 
     fn count_nodes(&self) -> (usize, usize) {
@@ -231,51 +327,70 @@ impl BTree {
     // pub fn delete(&self, key: u32) -> bool {
     //     return false;
     // }
+
+    pub fn print(&self) {
+        let mut gv = GraphViz::new();
+        self.root
+            .as_ref()
+            .map(|root| root.add_to_graph_vis(&mut gv));
+        gv.print();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::btree::mem::BTree;
+    use itertools::Itertools;
 
     #[test]
     fn leaf_node_insert_no_split() {
-        let mut btree = BTree::new(3);
-        btree.insert(10, 10);
-        btree.insert(13, 13);
-        btree.insert(15, 15);
-
-        assert_eq!((1, 0), btree.count_nodes());
-        assert_eq!(Some(10), btree.lookup(10));
-        assert_eq!(Some(13), btree.lookup(13));
-        assert_eq!(Some(15), btree.lookup(15));
-        assert_eq!(None, btree.lookup(9));
+        let seq = [10, 15, 13];
+        validate_insert(3, &seq);
     }
 
     #[test]
     fn leaf_node_insert_split() {
-        let mut btree = BTree::new(3);
-        btree.insert(10, 10);
-        btree.insert(13, 13);
-        btree.insert(15, 15);
-        btree.insert(11, 11);
-
-        assert_eq!((2, 1), btree.count_nodes());
-        assert_eq!(Some(10), btree.lookup(10));
-        assert_eq!(Some(11), btree.lookup(11));
-        assert_eq!(Some(13), btree.lookup(13));
-        assert_eq!(Some(15), btree.lookup(15));
-        assert_eq!(None, btree.lookup(9));
+        let seq = [10, 13, 15, 11];
+        validate_insert(3, &seq);
     }
 
     #[test]
     fn internal_node_insert_split() {
-        let mut btree = BTree::new(3);
-        for i in (0..13).step_by(2) {
-            btree.insert(i, i);
+        validate_insert(3, &(0..13).step_by(2).collect_vec()[..]);
+    }
+
+    #[test]
+    fn insert_25_capacity3() {
+        let seq = [
+            51, 88, 41, 26, 94, 39, 60, 85, 96, 74, 90, 62, 1, 89, 23, 57, 5, 90, 0, 22, 88, 33,
+            94, 41, 85,
+        ];
+
+        validate_insert(3, &seq);
+    }
+
+    #[test]
+    fn insert_100_capacity5() {
+        let seq = [
+            281, 59, 672, 361, 997, 991, 640, 914, 623, 976, 585, 312, 811, 652, 143, 819, 682,
+            743, 780, 234, 428, 365, 809, 214, 358, 84, 234, 313, 423, 161, 278, 68, 222, 208, 797,
+            775, 569, 557, 200, 349, 323, 385, 981, 15, 251, 981, 257, 616, 939, 15, 818, 799, 581,
+            658, 443, 73, 860, 704, 253, 287, 404, 105, 49, 131, 761, 105, 416, 63, 176, 610, 807,
+            873, 18, 134, 715, 61, 515, 232, 820, 991, 276, 396, 182, 535, 484, 782, 659, 39, 752,
+            176, 544, 275, 947, 449, 494, 823, 593, 291, 149, 998,
+        ];
+
+        validate_insert(5, &seq);
+    }
+
+    fn validate_insert(capacity: usize, values: &[u32]) {
+        let mut btree = BTree::new(capacity);
+        for i in values.iter() {
+            btree.insert(*i, *i);
         }
-        assert_eq!((5, 3), btree.count_nodes());
-        for i in (0..13).step_by(2) {
-            assert_eq!(Some(i), btree.lookup(i));
+        for i in values.iter() {
+            assert_eq!(Some(*i), btree.lookup(*i));
         }
+        btree.print();
     }
 }

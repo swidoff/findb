@@ -93,7 +93,7 @@ impl GraphViz {
 }
 
 trait Node {
-    fn find_leaf(&self, key: u32) -> Option<&Leaf>;
+    fn find_leaf(&mut self, key: u32) -> Option<&mut Leaf>;
     fn insert(&mut self, key: u32, value: u32) -> InsertResult;
     fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize;
 
@@ -111,16 +111,16 @@ struct Leaf {
 }
 
 impl Node for Leaf {
-    fn find_leaf(&self, key: u32) -> Option<&Leaf> {
-        if !self.kv.is_empty() && key >= self.kv[0].1 && key <= self.kv[self.kv.len() - 1].1 {
-            Option::Some(&self)
+    fn find_leaf(&mut self, key: u32) -> Option<&mut Leaf> {
+        if !self.kv.is_empty() && key >= self.kv[0].0 && key <= self.kv[self.kv.len() - 1].0 {
+            Option::Some(self)
         } else {
             Option::None
         }
     }
 
     fn insert(&mut self, key: u32, value: u32) -> InsertResult {
-        let search_result = self.kv.binary_search_by_key(&key, |value| value.1);
+        let search_result = self.kv.binary_search_by_key(&key, |value| value.0);
         match search_result {
             Ok(_) => InsertResult::Duplicate,
             Err(index) => {
@@ -129,7 +129,7 @@ impl Node for Leaf {
                     InsertResult::SuccessNoSplit
                 } else {
                     let midpoint_index = self.kv.len() / 2;
-                    let midpoint_value = self.kv[midpoint_index].1;
+                    let midpoint_key = self.kv[midpoint_index].0;
 
                     // Allocate new kv for split node, moving from the midpoint of this node's kv.
                     let mut new_leaf = Leaf {
@@ -140,14 +140,14 @@ impl Node for Leaf {
                         .extend(self.kv.drain(midpoint_index..self.kv.len()));
 
                     // Insert the the new key and value nto the correct node.
-                    if key < midpoint_value {
+                    if key < midpoint_key {
                         self.insert(key, value);
                     } else {
                         new_leaf.insert(key, value);
                     }
 
                     InsertResult::SuccessSplit {
-                        split_key: midpoint_value,
+                        split_key: midpoint_key,
                         split_node: Box::new(new_leaf),
                     }
                 }
@@ -163,8 +163,19 @@ impl Node for Leaf {
 impl Leaf {
     fn lookup(&self, key: u32) -> Option<u32> {
         self.kv
-            .binary_search_by_key(&key, |value| value.1)
+            .binary_search_by_key(&key, |value| value.0)
             .map(|idx| self.kv[idx].1)
+            .ok()
+    }
+
+    fn update(&mut self, key: u32, value: u32) -> Option<u32> {
+        self.kv
+            .binary_search_by_key(&key, |value| value.0)
+            .map(|idx| {
+                let orig_value = self.kv[idx].1;
+                self.kv[idx].1 = value;
+                orig_value
+            })
             .ok()
     }
 }
@@ -190,8 +201,9 @@ impl InternalNode {
 }
 
 impl Node for InternalNode {
-    fn find_leaf(&self, key: u32) -> Option<&Leaf> {
-        self.pointers[self.index_for(key)].find_leaf(key)
+    fn find_leaf(&mut self, key: u32) -> Option<&mut Leaf> {
+        let index = self.index_for(key);
+        self.pointers[index].find_leaf(key)
     }
 
     fn insert(&mut self, key: u32, value: u32) -> InsertResult {
@@ -286,10 +298,11 @@ impl BTree {
         self.root.as_ref().map_or((0, 0), |root| root.count_nodes())
     }
 
-    pub fn lookup(&self, key: u32) -> Option<u32> {
+    pub fn lookup(&mut self, key: u32) -> Option<u32> {
         self.root
-            .as_ref()
-            .and_then(|root| root.find_leaf(key).and_then(|leaf| leaf.lookup(key)))
+            .as_mut()
+            .and_then(|root| root.find_leaf(key))
+            .and_then(|leaf| leaf.lookup(key))
     }
 
     // pub fn lookup_range<'a>(&self, from_key: u32, to_key: u32) -> &'a dyn Iterator<Item = u32> {
@@ -320,10 +333,13 @@ impl BTree {
         }
     }
 
-    // pub fn update(&self, key: u32, value: u32) -> bool {
-    //     return false;
-    // }
-    //
+    pub fn update(&mut self, key: u32, value: u32) -> Option<u32> {
+        self.root
+            .as_mut()
+            .and_then(|root| root.find_leaf(key))
+            .and_then(|leaf| leaf.update(key, value))
+    }
+
     // pub fn delete(&self, key: u32) -> bool {
     //     return false;
     // }
@@ -345,18 +361,23 @@ mod tests {
     #[test]
     fn leaf_node_insert_no_split() {
         let seq = [10, 15, 13];
-        validate_insert(3, &seq);
+        let mut btree = validate_insert_and_update(3, &seq);
+        assert_eq!((1, 0), btree.count_nodes());
+        assert_eq!(None, btree.lookup(11));
     }
 
     #[test]
     fn leaf_node_insert_split() {
         let seq = [10, 13, 15, 11];
-        validate_insert(3, &seq);
+        let mut btree = validate_insert_and_update(3, &seq);
+        assert_eq!((2, 1), btree.count_nodes());
     }
 
     #[test]
     fn internal_node_insert_split() {
-        validate_insert(3, &(0..13).step_by(2).collect_vec()[..]);
+        let seq = (0..13).step_by(2).collect_vec();
+        let btree = validate_insert_and_update(3, &seq[..]);
+        assert_eq!((5, 3), btree.count_nodes());
     }
 
     #[test]
@@ -366,7 +387,7 @@ mod tests {
             94, 41, 85,
         ];
 
-        validate_insert(3, &seq);
+        validate_insert_and_update(3, &seq);
     }
 
     #[test]
@@ -380,10 +401,10 @@ mod tests {
             176, 544, 275, 947, 449, 494, 823, 593, 291, 149, 998,
         ];
 
-        validate_insert(5, &seq);
+        validate_insert_and_update(5, &seq);
     }
 
-    fn validate_insert(capacity: usize, values: &[u32]) {
+    fn validate_insert_and_update(capacity: usize, values: &[u32]) -> BTree {
         let mut btree = BTree::new(capacity);
         for i in values.iter() {
             btree.insert(*i, *i);
@@ -391,6 +412,15 @@ mod tests {
         for i in values.iter() {
             assert_eq!(Some(*i), btree.lookup(*i));
         }
+        for i in values.iter() {
+            let initial_value = btree.lookup(*i);
+            let orig_value = btree.update(*i, *i * 10);
+            assert_eq!(initial_value, orig_value);
+        }
+        for i in values.iter() {
+            assert_eq!(Some(*i * 10), btree.lookup(*i));
+        }
         btree.print();
+        btree
     }
 }

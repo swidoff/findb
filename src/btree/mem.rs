@@ -95,19 +95,46 @@ impl GraphViz {
 trait Node {
     fn find_leaf(&mut self, key: u32) -> Option<&mut Leaf>;
     fn insert(&mut self, key: u32, value: u32) -> InsertResult;
+    fn delete(&mut self, key: u32) -> Option<u32>;
+    fn merge(&mut self, midpoint_key: u32, other: &mut Box<dyn Node>) -> bool;
     fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize;
 
     fn count_nodes(&self) -> (usize, usize) {
-        return (1, 0);
+        (1, 0)
     }
-
     fn as_internal(&mut self) -> Option<&mut InternalNode> {
-        return None;
+        None
+    }
+    fn merge_into_leaf(&mut self, _other: &mut Leaf) -> bool {
+        false
+    }
+    fn merge_into_internal_node(&mut self, _midpoint_key: u32, _other: &mut InternalNode) -> bool {
+        false
     }
 }
 
 struct Leaf {
     kv: Vec<(u32, u32)>,
+}
+
+impl Leaf {
+    fn lookup(&self, key: u32) -> Option<u32> {
+        self.kv
+            .binary_search_by_key(&key, |value| value.0)
+            .map(|idx| self.kv[idx].1)
+            .ok()
+    }
+
+    fn update(&mut self, key: u32, value: u32) -> Option<u32> {
+        self.kv
+            .binary_search_by_key(&key, |value| value.0)
+            .map(|idx| {
+                let orig_value = self.kv[idx].1;
+                self.kv[idx].1 = value;
+                orig_value
+            })
+            .ok()
+    }
 }
 
 impl Node for Leaf {
@@ -155,28 +182,32 @@ impl Node for Leaf {
         }
     }
 
+    fn delete(&mut self, key: u32) -> Option<u32> {
+        let search_result = self.kv.binary_search_by_key(&key, |value| value.0);
+        match search_result {
+            Ok(index) => {
+                let value = self.kv.remove(index);
+                Some(value.1)
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn merge(&mut self, _midpoint_key: u32, other: &mut Box<dyn Node>) -> bool {
+        other.merge_into_leaf(self)
+    }
+
     fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize {
         graphviz.add_leaf_node(&self.kv)
     }
-}
 
-impl Leaf {
-    fn lookup(&self, key: u32) -> Option<u32> {
-        self.kv
-            .binary_search_by_key(&key, |value| value.0)
-            .map(|idx| self.kv[idx].1)
-            .ok()
-    }
-
-    fn update(&mut self, key: u32, value: u32) -> Option<u32> {
-        self.kv
-            .binary_search_by_key(&key, |value| value.0)
-            .map(|idx| {
-                let orig_value = self.kv[idx].1;
-                self.kv[idx].1 = value;
-                orig_value
-            })
-            .ok()
+    fn merge_into_leaf(&mut self, other: &mut Leaf) -> bool {
+        if self.kv.len() + other.kv.len() > other.kv.capacity() {
+            false
+        } else {
+            other.kv.extend(self.kv.drain(0..self.kv.len()));
+            true
+        }
     }
 }
 
@@ -255,6 +286,36 @@ impl Node for InternalNode {
         }
     }
 
+    fn delete(&mut self, key: u32) -> Option<u32> {
+        let delete_index = self.index_for(key);
+        let result = self.pointers[delete_index].delete(key);
+        if result.is_some() {
+            let mut merged = false;
+            if delete_index > 0 {
+                let midpoint_key = self.keys[delete_index - 1];
+                let (left, right) = self.pointers.split_at_mut(delete_index);
+                if left[left.len() - 1].merge(midpoint_key, &mut right[0]) {
+                    self.keys.remove(delete_index - 1);
+                    self.pointers.remove(delete_index);
+                    merged = true
+                }
+            }
+            if !merged && delete_index < self.pointers.len() - 1 {
+                let midpoint_key = self.keys[delete_index];
+                let (left, right) = self.pointers.split_at_mut(delete_index + 1);
+                if left[left.len() - 1].merge(midpoint_key, &mut right[0]) {
+                    self.keys.remove(delete_index);
+                    self.pointers.remove(delete_index + 1);
+                }
+            }
+        }
+        result
+    }
+
+    fn merge(&mut self, midpoint_key: u32, other: &mut Box<dyn Node>) -> bool {
+        other.merge_into_internal_node(midpoint_key, self)
+    }
+
     fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize {
         let node_id = graphviz.add_internal_node(&self.keys);
         for i in 0..self.pointers.len() {
@@ -277,6 +338,19 @@ impl Node for InternalNode {
 
     fn as_internal(&mut self) -> Option<&mut InternalNode> {
         Some(self)
+    }
+
+    fn merge_into_internal_node(&mut self, midpoint_key: u32, other: &mut InternalNode) -> bool {
+        if self.pointers.len() + other.pointers.len() > other.pointers.capacity() {
+            false
+        } else {
+            other.keys.push(midpoint_key);
+            other.keys.extend(self.keys.drain(0..self.keys.len()));
+            other
+                .pointers
+                .extend(self.pointers.drain(0..self.pointers.len()));
+            true
+        }
     }
 }
 
@@ -341,9 +415,9 @@ impl BTree {
             .and_then(|leaf| leaf.update(key, value))
     }
 
-    // pub fn delete(&self, key: u32) -> bool {
-    //     return false;
-    // }
+    pub fn delete(&mut self, key: u32) -> Option<u32> {
+        self.root.as_mut().and_then(|root| root.delete(key))
+    }
 
     pub fn print(&self) {
         let mut gv = GraphViz::new();
@@ -356,7 +430,7 @@ impl BTree {
 
 #[cfg(test)]
 mod tests {
-    use crate::btree::mem::BTree;
+    use crate::btree::mem::{BTree, InternalNode, Leaf, Node};
     use itertools::Itertools;
 
     #[test]
@@ -370,7 +444,7 @@ mod tests {
     #[test]
     fn leaf_node_insert_split() {
         let seq = [10, 13, 15, 11];
-        let mut btree = validate_insert_and_update(3, &seq);
+        let btree = validate_insert_and_update(3, &seq);
         assert_eq!((2, 1), btree.count_nodes());
     }
 
@@ -423,5 +497,124 @@ mod tests {
         }
         btree.print();
         btree
+    }
+
+    #[test]
+    fn delete_no_merge() {
+        let mut btree = BTree {
+            capacity: 3,
+            root: Some(Box::new(Leaf {
+                kv: vec![(15, 150), (16, 160), (18, 180)],
+            })),
+        };
+
+        assert_eq!(Some(150), btree.delete(15));
+        assert_eq!(None, btree.lookup(15));
+        assert_eq!(None, btree.delete(17));
+    }
+
+    #[test]
+    fn delete_merge_leaves() {
+        let leaf1 = Box::new(Leaf {
+            kv: vec![(1, 10), (5, 50), (10, 100)],
+        });
+        let leaf2 = Box::new(Leaf {
+            kv: vec![(15, 150), (16, 160), (17, 170)],
+        });
+        let leaf3 = Box::new(Leaf {
+            kv: vec![(20, 200), (23, 230), (25, 250)],
+        });
+        let mut btree = BTree {
+            capacity: 3,
+            root: Some(Box::new(InternalNode {
+                keys: vec![11, 20],
+                pointers: vec![leaf1, leaf2, leaf3],
+            })),
+        };
+
+        btree.print();
+        assert_eq!((3, 1), btree.count_nodes());
+        assert_eq!(Some(170), btree.delete(17));
+        assert_eq!(Some(230), btree.delete(23));
+        assert_eq!(Some(160), btree.delete(16));
+        assert_eq!((2, 1), btree.count_nodes());
+        btree.print();
+    }
+
+    #[test]
+    fn delete_merge_internal_nodes() {
+        fn leaf(keys: &[u32]) -> Box<Leaf> {
+            let mut kv = Vec::with_capacity(3);
+            kv.extend(keys.iter().map(|k| (*k, *k * 10)));
+            Box::new(Leaf { kv })
+        }
+
+        fn internal(keys_arr: &[u32], pointers_arr: Vec<Box<dyn Node>>) -> Box<InternalNode> {
+            let mut keys = Vec::with_capacity(3);
+            let mut pointers = Vec::with_capacity(4);
+            keys.extend(keys_arr);
+            pointers.extend(pointers_arr);
+            Box::new(InternalNode { keys, pointers })
+        }
+
+        let leaf1 = leaf(&[1, 2, 3]);
+        let leaf2 = leaf(&[4]);
+        let leaf3 = leaf(&[6, 7, 8]);
+        let leaf4 = leaf(&[9]);
+        let leaf5 = leaf(&[10]);
+        let leaf6 = leaf(&[11, 12]);
+        let leaf7 = leaf(&[13, 14, 15]);
+        let internal1 = internal(&[4], vec![leaf1, leaf2]);
+        let internal2 = internal(&[9, 10], vec![leaf3, leaf4, leaf5]);
+        let internal3 = internal(&[13], vec![leaf6, leaf7]);
+        let root = internal(&[5, 11], vec![internal1, internal2, internal3]);
+        let mut btree = BTree {
+            capacity: 3,
+            root: Some(root),
+        };
+
+        btree.print();
+        assert_eq!((7, 4), btree.count_nodes());
+        assert_eq!(Some(100), btree.delete(10));
+        assert_eq!((6, 3), btree.count_nodes());
+        btree.print();
+    }
+
+    #[test]
+    fn delete_100_capacity5() {
+        let seq = [
+            90, 95, 85, 41, 11, 29, 100, 19, 1, 30, 3, 2, 39, 18, 82, 26, 49, 28, 46, 88, 77, 58,
+            35, 54, 61, 16, 91, 9, 40, 48, 94, 45, 99, 69, 38, 57, 65, 13, 7, 55, 22, 86, 71, 34,
+            50, 15, 98, 10, 36, 96, 79, 92, 62, 21, 89, 43, 78, 93, 44, 20, 72, 56, 68, 17, 6, 42,
+            73, 64, 70, 75, 5, 76, 80, 74, 8, 63, 60, 59, 31, 25, 27, 33, 32, 14, 52, 24, 4, 47,
+            81, 97, 53, 51, 84, 67, 83, 12, 23, 37, 87, 66,
+        ];
+
+        let mut btree = BTree::new(5);
+        for i in seq.iter() {
+            btree.insert(*i, *i * 100);
+        }
+        btree.print();
+
+        for i in 0..seq.len() {
+            let initial_value = btree.lookup(seq[i]);
+            let orig_value = btree.delete(seq[i]);
+            assert_eq!(initial_value, orig_value);
+
+            for j in (i + 1)..seq.len() {
+                assert_eq!(Some(seq[j] * 100), btree.lookup(seq[j]));
+            }
+        }
+        for i in seq.iter() {
+            assert_eq!(None, btree.lookup(*i));
+        }
+        // assert_eq!((1, 0), btree.count_nodes(1, 0));
+        // btree.print();
+
+        for i in 0..25 {
+            btree.insert(seq[i], seq[i] * 100);
+            assert_eq!(Some(seq[i] * 100), btree.lookup(seq[i]));
+        }
+        btree.print();
     }
 }

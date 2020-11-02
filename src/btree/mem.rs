@@ -1,10 +1,368 @@
+use std::cell::RefCell;
+use std::rc::{Rc, Weak};
+
 enum InsertResult {
     SuccessNoSplit,
     Duplicate,
     SuccessSplit {
         split_key: u32,
-        split_node: Box<dyn Node>,
+        split_node: Rc<RefCell<dyn Node>>,
     },
+}
+
+trait Node {
+    fn lookup(&self, key: u32) -> Option<u32>;
+    fn update(&mut self, key: u32, value: u32) -> Option<u32>;
+    fn insert(&mut self, key: u32, value: u32) -> InsertResult;
+    fn delete(&mut self, key: u32) -> Option<u32>;
+    fn merge(&mut self, midpoint_key: u32, other: &Rc<RefCell<dyn Node>>) -> bool;
+    fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize;
+
+    fn count_nodes(&self) -> (usize, usize) {
+        (1, 0)
+    }
+    fn merge_into_leaf(&mut self, _other: &mut Leaf) -> bool {
+        false
+    }
+    fn merge_into_internal_node(&mut self, _midpoint_key: u32, _other: &mut InternalNode) -> bool {
+        false
+    }
+}
+
+struct Leaf {
+    kv: Vec<(u32, u32)>,
+    next: Weak<RefCell<Leaf>>,
+}
+
+impl Leaf {
+    fn new(capacity: usize) -> Leaf {
+        Leaf {
+            kv: Vec::with_capacity(capacity),
+            next: Weak::new(),
+        }
+    }
+
+    fn from_kv(capacity: usize, kv: &[(u32, u32)]) -> Leaf {
+        let mut leaf = Leaf {
+            kv: Vec::with_capacity(capacity),
+            next: Weak::new(),
+        };
+        leaf.kv.extend_from_slice(kv);
+        leaf
+    }
+}
+
+impl Node for Leaf {
+    fn lookup(&self, key: u32) -> Option<u32> {
+        self.kv
+            .binary_search_by_key(&key, |value| value.0)
+            .map(|idx| self.kv[idx].1)
+            .ok()
+    }
+
+    fn update(&mut self, key: u32, value: u32) -> Option<u32> {
+        self.kv
+            .binary_search_by_key(&key, |value| value.0)
+            .map(|idx| {
+                let orig_value = self.kv[idx].1;
+                self.kv[idx].1 = value;
+                orig_value
+            })
+            .ok()
+    }
+
+    fn insert(&mut self, key: u32, value: u32) -> InsertResult {
+        let search_result = self.kv.binary_search_by_key(&key, |value| value.0);
+        match search_result {
+            Ok(_) => InsertResult::Duplicate,
+            Err(index) => {
+                if self.kv.len() < self.kv.capacity() {
+                    self.kv.insert(index, (key, value));
+                    InsertResult::SuccessNoSplit
+                } else {
+                    let midpoint_index = self.kv.len() / 2;
+                    let midpoint_key = self.kv[midpoint_index].0;
+
+                    // Allocate new kv for split node, moving from the midpoint of this node's kv.
+                    let mut new_leaf = Leaf::new(self.kv.capacity());
+                    new_leaf
+                        .kv
+                        .extend(self.kv.drain(midpoint_index..self.kv.len()));
+
+                    // Insert the the new key and value into the correct node.
+                    if key < midpoint_key {
+                        self.insert(key, value);
+                    } else {
+                        new_leaf.insert(key, value);
+                    }
+
+                    let split_node = Rc::new(RefCell::new(new_leaf));
+                    self.next = Rc::downgrade(&split_node);
+                    InsertResult::SuccessSplit {
+                        split_key: midpoint_key,
+                        split_node,
+                    }
+                }
+            }
+        }
+    }
+
+    fn delete(&mut self, key: u32) -> Option<u32> {
+        let search_result = self.kv.binary_search_by_key(&key, |value| value.0);
+        match search_result {
+            Ok(index) => {
+                let value = self.kv.remove(index);
+                Some(value.1)
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn merge(&mut self, _midpoint_key: u32, other: &Rc<RefCell<dyn Node>>) -> bool {
+        other.borrow_mut().merge_into_leaf(self)
+    }
+
+    fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize {
+        graphviz.add_leaf_node(&self.kv)
+    }
+
+    fn merge_into_leaf(&mut self, other: &mut Leaf) -> bool {
+        if self.kv.len() + other.kv.len() > other.kv.capacity() {
+            false
+        } else {
+            other.kv.extend(self.kv.drain(0..self.kv.len()));
+            true
+        }
+    }
+}
+
+struct InternalNode {
+    keys: Vec<u32>,
+    pointers: Vec<Rc<RefCell<dyn Node>>>,
+}
+
+impl InternalNode {
+    fn index_for(&self, key: u32) -> usize {
+        match self.keys.binary_search(&key) {
+            Ok(index) => index + 1,
+            Err(index) => index,
+        }
+    }
+
+    fn insert_key_and_pointer(&mut self, key: u32, pointer: Rc<RefCell<dyn Node>>) {
+        let idx = self.index_for(key);
+        self.keys.insert(idx, key);
+        self.pointers.insert(idx + 1, pointer);
+    }
+}
+
+impl Node for InternalNode {
+    fn lookup(&self, key: u32) -> Option<u32> {
+        let index = self.index_for(key);
+        self.pointers[index].borrow_mut().lookup(key)
+    }
+
+    fn update(&mut self, key: u32, value: u32) -> Option<u32> {
+        let index = self.index_for(key);
+        self.pointers[index].borrow_mut().update(key, value)
+    }
+
+    fn insert(&mut self, key: u32, value: u32) -> InsertResult {
+        let insert_index = self.index_for(key);
+        let result = self.pointers[insert_index].borrow_mut().insert(key, value);
+        match result {
+            InsertResult::SuccessSplit {
+                split_key,
+                split_node,
+            } => {
+                if self.keys.len() < self.keys.capacity() {
+                    self.insert_key_and_pointer(split_key, split_node);
+                    InsertResult::SuccessNoSplit
+                } else {
+                    let midpoint_index = self.keys.len() / 2;
+                    let midpoint_key = self.keys[midpoint_index];
+
+                    let mut new_node = InternalNode {
+                        keys: Vec::with_capacity(self.keys.capacity()),
+                        pointers: Vec::with_capacity(self.pointers.capacity()),
+                    };
+
+                    // Allocate new kv for split node, moving from the midpoint of this node's kv.
+                    new_node
+                        .keys
+                        .extend(self.keys.drain((midpoint_index + 1)..self.keys.len()));
+                    new_node.pointers.extend(
+                        self.pointers
+                            .drain((midpoint_index + 1)..self.pointers.len()),
+                    );
+
+                    // Remove the midpoint, since it's being promoted to the parent node.
+                    self.keys.truncate(midpoint_index);
+                    self.pointers.truncate(midpoint_index + 1);
+
+                    if split_key < midpoint_key {
+                        self.insert_key_and_pointer(split_key, split_node)
+                    } else {
+                        new_node.insert_key_and_pointer(split_key, split_node)
+                    }
+
+                    InsertResult::SuccessSplit {
+                        split_key: midpoint_key,
+                        split_node: Rc::new(RefCell::new(new_node)),
+                    }
+                }
+            }
+            x => x,
+        }
+    }
+
+    fn delete(&mut self, key: u32) -> Option<u32> {
+        let delete_index = self.index_for(key);
+        let result = self.pointers[delete_index].borrow_mut().delete(key);
+        if result.is_some() {
+            let mut merged = false;
+            if delete_index > 0 {
+                let midpoint_key = self.keys[delete_index - 1];
+                let (left, right) = self.pointers.split_at_mut(delete_index);
+                if left[left.len() - 1]
+                    .borrow_mut()
+                    .merge(midpoint_key, &right[0])
+                {
+                    self.keys.remove(delete_index - 1);
+                    self.pointers.remove(delete_index);
+                    merged = true
+                }
+            }
+            if !merged && delete_index < self.pointers.len() - 1 {
+                let midpoint_key = self.keys[delete_index];
+                let (left, right) = self.pointers.split_at_mut(delete_index + 1);
+                if left[left.len() - 1]
+                    .borrow_mut()
+                    .merge(midpoint_key, &right[0])
+                {
+                    self.keys.remove(delete_index);
+                    self.pointers.remove(delete_index + 1);
+                }
+            }
+        }
+        result
+    }
+
+    fn merge(&mut self, midpoint_key: u32, other: &Rc<RefCell<dyn Node>>) -> bool {
+        other
+            .borrow_mut()
+            .merge_into_internal_node(midpoint_key, self)
+    }
+
+    fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize {
+        let node_id = graphviz.add_internal_node(&self.keys);
+        for i in 0..self.pointers.len() {
+            let target_id = self.pointers[i].borrow().add_to_graph_vis(graphviz);
+            graphviz.add_edge(node_id, i, target_id);
+        }
+        return node_id;
+    }
+
+    fn count_nodes(&self) -> (usize, usize) {
+        let mut leaf_count = 0;
+        let mut internal_count = 1;
+        for child in self.pointers.iter() {
+            let (inner_leaf_count, inner_internal_count) = child.borrow().count_nodes();
+            leaf_count += inner_leaf_count;
+            internal_count += inner_internal_count;
+        }
+        (leaf_count, internal_count)
+    }
+
+    fn merge_into_internal_node(&mut self, midpoint_key: u32, other: &mut InternalNode) -> bool {
+        if self.pointers.len() + other.pointers.len() > other.pointers.capacity() {
+            false
+        } else {
+            other.keys.push(midpoint_key);
+            other.keys.extend(self.keys.drain(0..self.keys.len()));
+            other
+                .pointers
+                .extend(self.pointers.drain(0..self.pointers.len()));
+            true
+        }
+    }
+}
+
+pub struct BTree {
+    capacity: usize,
+    root: Option<Rc<RefCell<dyn Node>>>,
+}
+
+impl BTree {
+    pub fn new(capacity: usize) -> BTree {
+        BTree {
+            capacity,
+            root: Some(Rc::new(RefCell::new(Leaf::new(capacity)))),
+        }
+    }
+
+    pub fn count_nodes(&self) -> (usize, usize) {
+        self.root
+            .as_ref()
+            .map_or((0, 0), |root| root.borrow().count_nodes())
+    }
+
+    pub fn lookup(&mut self, key: u32) -> Option<u32> {
+        self.root
+            .as_mut()
+            .and_then(|root| root.borrow().lookup(key))
+    }
+
+    // pub fn lookup_range<'a>(&self, from_key: u32, to_key: u32) -> &'a dyn Iterator<Item = u32> {
+    //     panic!("Not implemented")
+    // }
+
+    pub fn insert(&mut self, key: u32, value: u32) -> bool {
+        let result = self
+            .root
+            .as_mut()
+            .map(|root| root.borrow_mut().insert(key, value));
+        match result {
+            Some(InsertResult::SuccessNoSplit) => true,
+            Some(InsertResult::SuccessSplit {
+                split_key: midpoint_key,
+                split_node,
+            }) => {
+                if let Some(old_root) = self.root.take() {
+                    let mut new_root = InternalNode {
+                        keys: Vec::with_capacity(self.capacity),
+                        pointers: Vec::with_capacity(self.capacity + 1),
+                    };
+                    new_root.keys.push(midpoint_key);
+                    new_root.pointers.push(old_root);
+                    new_root.pointers.push(split_node);
+                    self.root.replace(Rc::new(RefCell::new(new_root)));
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn update(&mut self, key: u32, value: u32) -> Option<u32> {
+        self.root
+            .as_mut()
+            .and_then(|root| root.borrow_mut().update(key, value))
+    }
+
+    pub fn delete(&mut self, key: u32) -> Option<u32> {
+        self.root
+            .as_mut()
+            .and_then(|root| root.borrow_mut().delete(key))
+    }
+
+    pub fn print(&self) {
+        let mut gv = GraphViz::new();
+        self.root
+            .as_ref()
+            .map(|root| root.borrow().add_to_graph_vis(&mut gv));
+        gv.print();
+    }
 }
 
 struct GraphViz {
@@ -89,342 +447,6 @@ impl GraphViz {
             println!("\t{}", line);
         }
         println!("}}");
-    }
-}
-
-trait Node {
-    fn find_leaf(&mut self, key: u32) -> Option<&mut Leaf>;
-    fn insert(&mut self, key: u32, value: u32) -> InsertResult;
-    fn delete(&mut self, key: u32) -> Option<u32>;
-    fn merge(&mut self, midpoint_key: u32, other: &mut Box<dyn Node>) -> bool;
-    fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize;
-
-    fn count_nodes(&self) -> (usize, usize) {
-        (1, 0)
-    }
-    fn as_internal(&mut self) -> Option<&mut InternalNode> {
-        None
-    }
-    fn merge_into_leaf(&mut self, _other: &mut Leaf) -> bool {
-        false
-    }
-    fn merge_into_internal_node(&mut self, _midpoint_key: u32, _other: &mut InternalNode) -> bool {
-        false
-    }
-}
-
-struct Leaf {
-    kv: Vec<(u32, u32)>,
-}
-
-impl Leaf {
-    fn lookup(&self, key: u32) -> Option<u32> {
-        self.kv
-            .binary_search_by_key(&key, |value| value.0)
-            .map(|idx| self.kv[idx].1)
-            .ok()
-    }
-
-    fn update(&mut self, key: u32, value: u32) -> Option<u32> {
-        self.kv
-            .binary_search_by_key(&key, |value| value.0)
-            .map(|idx| {
-                let orig_value = self.kv[idx].1;
-                self.kv[idx].1 = value;
-                orig_value
-            })
-            .ok()
-    }
-}
-
-impl Node for Leaf {
-    fn find_leaf(&mut self, key: u32) -> Option<&mut Leaf> {
-        if !self.kv.is_empty() && key >= self.kv[0].0 && key <= self.kv[self.kv.len() - 1].0 {
-            Option::Some(self)
-        } else {
-            Option::None
-        }
-    }
-
-    fn insert(&mut self, key: u32, value: u32) -> InsertResult {
-        let search_result = self.kv.binary_search_by_key(&key, |value| value.0);
-        match search_result {
-            Ok(_) => InsertResult::Duplicate,
-            Err(index) => {
-                if self.kv.len() < self.kv.capacity() {
-                    self.kv.insert(index, (key, value));
-                    InsertResult::SuccessNoSplit
-                } else {
-                    let midpoint_index = self.kv.len() / 2;
-                    let midpoint_key = self.kv[midpoint_index].0;
-
-                    // Allocate new kv for split node, moving from the midpoint of this node's kv.
-                    let mut new_leaf = Leaf {
-                        kv: Vec::with_capacity(self.kv.capacity()),
-                    };
-                    new_leaf
-                        .kv
-                        .extend(self.kv.drain(midpoint_index..self.kv.len()));
-
-                    // Insert the the new key and value into the correct node.
-                    if key < midpoint_key {
-                        self.insert(key, value);
-                    } else {
-                        new_leaf.insert(key, value);
-                    }
-
-                    InsertResult::SuccessSplit {
-                        split_key: midpoint_key,
-                        split_node: Box::new(new_leaf),
-                    }
-                }
-            }
-        }
-    }
-
-    fn delete(&mut self, key: u32) -> Option<u32> {
-        let search_result = self.kv.binary_search_by_key(&key, |value| value.0);
-        match search_result {
-            Ok(index) => {
-                let value = self.kv.remove(index);
-                Some(value.1)
-            }
-            Err(_) => None,
-        }
-    }
-
-    fn merge(&mut self, _midpoint_key: u32, other: &mut Box<dyn Node>) -> bool {
-        other.merge_into_leaf(self)
-    }
-
-    fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize {
-        graphviz.add_leaf_node(&self.kv)
-    }
-
-    fn merge_into_leaf(&mut self, other: &mut Leaf) -> bool {
-        if self.kv.len() + other.kv.len() > other.kv.capacity() {
-            false
-        } else {
-            other.kv.extend(self.kv.drain(0..self.kv.len()));
-            true
-        }
-    }
-}
-
-struct InternalNode {
-    keys: Vec<u32>,
-    pointers: Vec<Box<dyn Node>>,
-}
-
-impl InternalNode {
-    fn index_for(&self, key: u32) -> usize {
-        match self.keys.binary_search(&key) {
-            Ok(index) => index + 1,
-            Err(index) => index,
-        }
-    }
-
-    fn insert_key_and_pointer(&mut self, key: u32, pointer: Box<dyn Node>) {
-        let idx = self.index_for(key);
-        self.keys.insert(idx, key);
-        self.pointers.insert(idx + 1, pointer);
-    }
-}
-
-impl Node for InternalNode {
-    fn find_leaf(&mut self, key: u32) -> Option<&mut Leaf> {
-        let index = self.index_for(key);
-        self.pointers[index].find_leaf(key)
-    }
-
-    fn insert(&mut self, key: u32, value: u32) -> InsertResult {
-        let insert_index = self.index_for(key);
-        let result = self.pointers[insert_index].insert(key, value);
-        match result {
-            InsertResult::SuccessSplit {
-                split_key,
-                split_node,
-            } => {
-                if self.keys.len() < self.keys.capacity() {
-                    self.insert_key_and_pointer(split_key, split_node);
-                    InsertResult::SuccessNoSplit
-                } else {
-                    let midpoint_index = self.keys.len() / 2;
-                    let midpoint_key = self.keys[midpoint_index];
-
-                    let mut new_node = InternalNode {
-                        keys: Vec::with_capacity(self.keys.capacity()),
-                        pointers: Vec::with_capacity(self.pointers.capacity()),
-                    };
-
-                    // Allocate new kv for split node, moving from the midpoint of this node's kv.
-                    new_node
-                        .keys
-                        .extend(self.keys.drain((midpoint_index + 1)..self.keys.len()));
-                    new_node.pointers.extend(
-                        self.pointers
-                            .drain((midpoint_index + 1)..self.pointers.len()),
-                    );
-
-                    // Remove the midpoint, since it's being promoted to the parent node.
-                    self.keys.truncate(midpoint_index);
-                    self.pointers.truncate(midpoint_index + 1);
-
-                    if split_key < midpoint_key {
-                        self.insert_key_and_pointer(split_key, split_node)
-                    } else {
-                        new_node.insert_key_and_pointer(split_key, split_node)
-                    }
-
-                    InsertResult::SuccessSplit {
-                        split_key: midpoint_key,
-                        split_node: Box::new(new_node),
-                    }
-                }
-            }
-            x => x,
-        }
-    }
-
-    fn delete(&mut self, key: u32) -> Option<u32> {
-        let delete_index = self.index_for(key);
-        let result = self.pointers[delete_index].delete(key);
-        if result.is_some() {
-            let mut merged = false;
-            if delete_index > 0 {
-                let midpoint_key = self.keys[delete_index - 1];
-                let (left, right) = self.pointers.split_at_mut(delete_index);
-                if left[left.len() - 1].merge(midpoint_key, &mut right[0]) {
-                    self.keys.remove(delete_index - 1);
-                    self.pointers.remove(delete_index);
-                    merged = true
-                }
-            }
-            if !merged && delete_index < self.pointers.len() - 1 {
-                let midpoint_key = self.keys[delete_index];
-                let (left, right) = self.pointers.split_at_mut(delete_index + 1);
-                if left[left.len() - 1].merge(midpoint_key, &mut right[0]) {
-                    self.keys.remove(delete_index);
-                    self.pointers.remove(delete_index + 1);
-                }
-            }
-        }
-        result
-    }
-
-    fn merge(&mut self, midpoint_key: u32, other: &mut Box<dyn Node>) -> bool {
-        other.merge_into_internal_node(midpoint_key, self)
-    }
-
-    fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize {
-        let node_id = graphviz.add_internal_node(&self.keys);
-        for i in 0..self.pointers.len() {
-            let target_id = self.pointers[i].add_to_graph_vis(graphviz);
-            graphviz.add_edge(node_id, i, target_id);
-        }
-        return node_id;
-    }
-
-    fn count_nodes(&self) -> (usize, usize) {
-        let mut leaf_count = 0;
-        let mut internal_count = 1;
-        for child in self.pointers.iter() {
-            let (inner_leaf_count, inner_internal_count) = child.count_nodes();
-            leaf_count += inner_leaf_count;
-            internal_count += inner_internal_count;
-        }
-        (leaf_count, internal_count)
-    }
-
-    fn as_internal(&mut self) -> Option<&mut InternalNode> {
-        Some(self)
-    }
-
-    fn merge_into_internal_node(&mut self, midpoint_key: u32, other: &mut InternalNode) -> bool {
-        if self.pointers.len() + other.pointers.len() > other.pointers.capacity() {
-            false
-        } else {
-            other.keys.push(midpoint_key);
-            other.keys.extend(self.keys.drain(0..self.keys.len()));
-            other
-                .pointers
-                .extend(self.pointers.drain(0..self.pointers.len()));
-            true
-        }
-    }
-}
-
-pub struct BTree {
-    capacity: usize,
-    root: Option<Box<dyn Node>>,
-}
-
-impl BTree {
-    pub fn new(capacity: usize) -> BTree {
-        BTree {
-            capacity,
-            root: Some(Box::new(Leaf {
-                kv: Vec::with_capacity(capacity),
-            })),
-        }
-    }
-
-    pub fn count_nodes(&self) -> (usize, usize) {
-        self.root.as_ref().map_or((0, 0), |root| root.count_nodes())
-    }
-
-    pub fn lookup(&mut self, key: u32) -> Option<u32> {
-        self.root
-            .as_mut()
-            .and_then(|root| root.find_leaf(key))
-            .and_then(|leaf| leaf.lookup(key))
-    }
-
-    // pub fn lookup_range<'a>(&self, from_key: u32, to_key: u32) -> &'a dyn Iterator<Item = u32> {
-    //     panic!("Not implemented")
-    // }
-
-    pub fn insert(&mut self, key: u32, value: u32) -> bool {
-        let result = self.root.as_mut().map(|root| root.insert(key, value));
-        match result {
-            Some(InsertResult::SuccessNoSplit) => true,
-            Some(InsertResult::SuccessSplit {
-                split_key: midpoint_key,
-                split_node,
-            }) => {
-                if let Some(old_root) = self.root.take() {
-                    let mut new_root = InternalNode {
-                        keys: Vec::with_capacity(self.capacity),
-                        pointers: Vec::with_capacity(self.capacity + 1),
-                    };
-                    new_root.keys.push(midpoint_key);
-                    new_root.pointers.push(old_root);
-                    new_root.pointers.push(split_node);
-                    self.root.replace(Box::new(new_root));
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
-    pub fn update(&mut self, key: u32, value: u32) -> Option<u32> {
-        self.root
-            .as_mut()
-            .and_then(|root| root.find_leaf(key))
-            .and_then(|leaf| leaf.update(key, value))
-    }
-
-    pub fn delete(&mut self, key: u32) -> Option<u32> {
-        self.root.as_mut().and_then(|root| root.delete(key))
-    }
-
-    pub fn print(&self) {
-        let mut gv = GraphViz::new();
-        self.root
-            .as_ref()
-            .map(|root| root.add_to_graph_vis(&mut gv));
-        gv.print();
     }
 }
 

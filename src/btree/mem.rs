@@ -1,4 +1,5 @@
-use std::cell::RefCell;
+use std::borrow::Borrow;
+use std::cell::{Ref, RefCell};
 use std::rc::{Rc, Weak};
 
 enum InsertResult {
@@ -49,6 +50,26 @@ impl Leaf {
         };
         leaf.kv.extend_from_slice(kv);
         leaf
+    }
+
+    fn lookup_range(leaf: &Weak<RefCell<Leaf>>, from_key: u32, to_key: u32) -> LookupRangeIterator {
+        match leaf.upgrade() {
+            Some(l) => {
+                let l: &RefCell<Leaf> = l.borrow();
+                let l: Ref<Leaf> = l.borrow();
+                let index = match l.kv.binary_search_by_key(&from_key, |value| value.0) {
+                    Ok(index) => index,
+                    Err(index) => index,
+                };
+
+                LookupRangeIterator {
+                    leaf: Weak::clone(&leaf),
+                    index,
+                    to_key,
+                }
+            }
+            None => panic!("leaf node has been freed"),
+        }
     }
 }
 
@@ -131,7 +152,39 @@ impl Node for Leaf {
             false
         } else {
             other.kv.extend(self.kv.drain(0..self.kv.len()));
+            other.next = Weak::clone(&other.next);
             true
+        }
+    }
+}
+
+struct LookupRangeIterator {
+    leaf: Weak<RefCell<Leaf>>,
+    index: usize,
+    to_key: u32,
+}
+
+impl Iterator for LookupRangeIterator {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.leaf.upgrade() {
+            Some(leaf) => {
+                let leaf: &RefCell<Leaf> = leaf.borrow();
+                let leaf: Ref<Leaf> = leaf.borrow();
+                if leaf.kv[self.index].0 <= self.to_key {
+                    let res = Some(leaf.kv[self.index].1);
+                    self.index += 1;
+                    if self.index == leaf.kv.len() {
+                        self.leaf = Weak::clone(&leaf.next);
+                        self.index = 0;
+                    }
+                    res
+                } else {
+                    None
+                }
+            }
+            None => None,
         }
     }
 }
@@ -257,7 +310,9 @@ impl Node for InternalNode {
     fn add_to_graph_vis(&self, graphviz: &mut GraphViz) -> usize {
         let node_id = graphviz.add_internal_node(&self.keys);
         for i in 0..self.pointers.len() {
-            let target_id = self.pointers[i].borrow().add_to_graph_vis(graphviz);
+            let target: &RefCell<dyn Node> = self.pointers[i].borrow();
+            let target: Ref<dyn Node> = target.borrow();
+            let target_id = target.borrow().add_to_graph_vis(graphviz);
             graphviz.add_edge(node_id, i, target_id);
         }
         return node_id;
@@ -267,6 +322,8 @@ impl Node for InternalNode {
         let mut leaf_count = 0;
         let mut internal_count = 1;
         for child in self.pointers.iter() {
+            let child: &RefCell<dyn Node> = child.borrow();
+            let child: Ref<dyn Node> = child.borrow();
             let (inner_leaf_count, inner_internal_count) = child.borrow().count_nodes();
             leaf_count += inner_leaf_count;
             internal_count += inner_internal_count;
@@ -302,20 +359,24 @@ impl BTree {
     }
 
     pub fn count_nodes(&self) -> (usize, usize) {
-        self.root
-            .as_ref()
-            .map_or((0, 0), |root| root.borrow().count_nodes())
+        self.root.as_ref().map_or((0, 0), |root| {
+            let root: &RefCell<dyn Node> = root.borrow();
+            let root: Ref<dyn Node> = root.borrow();
+            root.count_nodes()
+        })
     }
 
     pub fn lookup(&mut self, key: u32) -> Option<u32> {
-        self.root
-            .as_mut()
-            .and_then(|root| root.borrow().lookup(key))
+        self.root.as_ref().and_then(|root| {
+            let root: &RefCell<dyn Node> = root.borrow();
+            let root: Ref<dyn Node> = root.borrow();
+            root.lookup(key)
+        })
     }
 
-    // pub fn lookup_range<'a>(&self, from_key: u32, to_key: u32) -> &'a dyn Iterator<Item = u32> {
-    //     panic!("Not implemented")
-    // }
+    pub fn lookup_range<'a>(&self, from_key: u32, to_key: u32) -> &'a dyn Iterator<Item = u32> {
+        panic!("Not implemented")
+    }
 
     pub fn insert(&mut self, key: u32, value: u32) -> bool {
         let result = self
@@ -358,9 +419,11 @@ impl BTree {
 
     pub fn print(&self) {
         let mut gv = GraphViz::new();
-        self.root
-            .as_ref()
-            .map(|root| root.borrow().add_to_graph_vis(&mut gv));
+        self.root.as_ref().map(|root| {
+            let root: &RefCell<dyn Node> = root.borrow();
+            let root: Ref<dyn Node> = root.borrow();
+            root.add_to_graph_vis(&mut gv)
+        });
         gv.print();
     }
 }
@@ -454,6 +517,8 @@ impl GraphViz {
 mod tests {
     use crate::btree::mem::{BTree, InternalNode, Leaf, Node};
     use itertools::Itertools;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     #[test]
     fn leaf_node_insert_no_split() {
@@ -525,9 +590,10 @@ mod tests {
     fn delete_no_merge() {
         let mut btree = BTree {
             capacity: 3,
-            root: Some(Box::new(Leaf {
-                kv: vec![(15, 150), (16, 160), (18, 180)],
-            })),
+            root: Some(Rc::new(RefCell::new(Leaf::from_kv(
+                3,
+                &[(15, 150), (16, 160), (18, 180)],
+            )))),
         };
 
         assert_eq!(Some(150), btree.delete(15));
@@ -537,21 +603,24 @@ mod tests {
 
     #[test]
     fn delete_merge_leaves() {
-        let leaf1 = Box::new(Leaf {
-            kv: vec![(1, 10), (5, 50), (10, 100)],
-        });
-        let leaf2 = Box::new(Leaf {
-            kv: vec![(15, 150), (16, 160), (17, 170)],
-        });
-        let leaf3 = Box::new(Leaf {
-            kv: vec![(20, 200), (23, 230), (25, 250)],
-        });
+        let leaf1 = Rc::new(RefCell::new(Leaf::from_kv(
+            3,
+            &[(1, 10), (5, 50), (10, 100)],
+        )));
+        let leaf2 = Rc::new(RefCell::new(Leaf::from_kv(
+            3,
+            &[(15, 150), (16, 160), (17, 170)],
+        )));
+        let leaf3 = Rc::new(RefCell::new(Leaf::from_kv(
+            3,
+            &[(20, 200), (23, 230), (25, 250)],
+        )));
         let mut btree = BTree {
             capacity: 3,
-            root: Some(Box::new(InternalNode {
+            root: Some(Rc::new(RefCell::new(InternalNode {
                 keys: vec![11, 20],
                 pointers: vec![leaf1, leaf2, leaf3],
-            })),
+            }))),
         };
 
         btree.print();
@@ -565,18 +634,21 @@ mod tests {
 
     #[test]
     fn delete_merge_internal_nodes() {
-        fn leaf(keys: &[u32]) -> Box<Leaf> {
+        fn leaf(keys: &[u32]) -> Rc<RefCell<Leaf>> {
             let mut kv = Vec::with_capacity(3);
             kv.extend(keys.iter().map(|k| (*k, *k * 10)));
-            Box::new(Leaf { kv })
+            Rc::new(RefCell::new(Leaf::from_kv(3, &kv[..])))
         }
 
-        fn internal(keys_arr: &[u32], pointers_arr: Vec<Box<dyn Node>>) -> Box<InternalNode> {
+        fn internal(
+            keys_arr: &[u32],
+            pointers_arr: Vec<Rc<RefCell<dyn Node>>>,
+        ) -> Rc<RefCell<InternalNode>> {
             let mut keys = Vec::with_capacity(3);
             let mut pointers = Vec::with_capacity(4);
             keys.extend(keys_arr);
             pointers.extend(pointers_arr);
-            Box::new(InternalNode { keys, pointers })
+            Rc::new(RefCell::new(InternalNode { keys, pointers }))
         }
 
         let leaf1 = leaf(&[1, 2, 3]);

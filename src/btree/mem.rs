@@ -13,6 +13,7 @@ enum InsertResult {
 
 trait Node {
     fn lookup(&self, key: u32) -> Option<u32>;
+    fn lookup_range(&self, from_key: u32, to_key: u32) -> LookupRangeIterator;
     fn update(&mut self, key: u32, value: u32) -> Option<u32>;
     fn insert(&mut self, key: u32, value: u32) -> InsertResult;
     fn delete(&mut self, key: u32) -> Option<u32>;
@@ -33,6 +34,7 @@ trait Node {
 struct Leaf {
     kv: Vec<(u32, u32)>,
     next: Weak<RefCell<Leaf>>,
+    this: Weak<RefCell<Leaf>>,
 }
 
 impl Leaf {
@@ -40,6 +42,7 @@ impl Leaf {
         Leaf {
             kv: Vec::with_capacity(capacity),
             next: Weak::new(),
+            this: Weak::new(),
         }
     }
 
@@ -47,29 +50,10 @@ impl Leaf {
         let mut leaf = Leaf {
             kv: Vec::with_capacity(capacity),
             next: Weak::new(),
+            this: Weak::new(),
         };
         leaf.kv.extend_from_slice(kv);
         leaf
-    }
-
-    fn lookup_range(leaf: &Weak<RefCell<Leaf>>, from_key: u32, to_key: u32) -> LookupRangeIterator {
-        match leaf.upgrade() {
-            Some(l) => {
-                let l: &RefCell<Leaf> = l.borrow();
-                let l: Ref<Leaf> = l.borrow();
-                let index = match l.kv.binary_search_by_key(&from_key, |value| value.0) {
-                    Ok(index) => index,
-                    Err(index) => index,
-                };
-
-                LookupRangeIterator {
-                    leaf: Weak::clone(&leaf),
-                    index,
-                    to_key,
-                }
-            }
-            None => panic!("leaf node has been freed"),
-        }
     }
 }
 
@@ -79,6 +63,19 @@ impl Node for Leaf {
             .binary_search_by_key(&key, |value| value.0)
             .map(|idx| self.kv[idx].1)
             .ok()
+    }
+
+    fn lookup_range(&self, from_key: u32, to_key: u32) -> LookupRangeIterator {
+        let index = match self.kv.binary_search_by_key(&from_key, |value| value.0) {
+            Ok(index) => index,
+            Err(index) => index,
+        };
+
+        LookupRangeIterator {
+            leaf: Weak::clone(&self.this),
+            index,
+            to_key,
+        }
     }
 
     fn update(&mut self, key: u32, value: u32) -> Option<u32> {
@@ -118,6 +115,8 @@ impl Node for Leaf {
                     }
 
                     let split_node = Rc::new(RefCell::new(new_leaf));
+                    split_node.borrow_mut().this = Rc::downgrade(&split_node);
+                    split_node.borrow_mut().next = Weak::clone(&self.next);
                     self.next = Rc::downgrade(&split_node);
                     InsertResult::SuccessSplit {
                         split_key: midpoint_key,
@@ -158,10 +157,20 @@ impl Node for Leaf {
     }
 }
 
-struct LookupRangeIterator {
+pub struct LookupRangeIterator {
     leaf: Weak<RefCell<Leaf>>,
     index: usize,
     to_key: u32,
+}
+
+impl LookupRangeIterator {
+    fn empty() -> LookupRangeIterator {
+        LookupRangeIterator {
+            leaf: Weak::new(),
+            index: 0,
+            to_key: 0,
+        }
+    }
 }
 
 impl Iterator for LookupRangeIterator {
@@ -172,13 +181,13 @@ impl Iterator for LookupRangeIterator {
             Some(leaf) => {
                 let leaf: &RefCell<Leaf> = leaf.borrow();
                 let leaf: Ref<Leaf> = leaf.borrow();
-                if leaf.kv[self.index].0 <= self.to_key {
+                if self.index >= leaf.kv.len() {
+                    self.leaf = Weak::clone(&leaf.next);
+                    self.index = 0;
+                    self.next()
+                } else if leaf.kv[self.index].0 <= self.to_key {
                     let res = Some(leaf.kv[self.index].1);
                     self.index += 1;
-                    if self.index == leaf.kv.len() {
-                        self.leaf = Weak::clone(&leaf.next);
-                        self.index = 0;
-                    }
                     res
                 } else {
                     None
@@ -213,6 +222,13 @@ impl Node for InternalNode {
     fn lookup(&self, key: u32) -> Option<u32> {
         let index = self.index_for(key);
         self.pointers[index].borrow_mut().lookup(key)
+    }
+
+    fn lookup_range(&self, from_key: u32, to_key: u32) -> LookupRangeIterator {
+        let index = self.index_for(from_key);
+        self.pointers[index]
+            .borrow_mut()
+            .lookup_range(from_key, to_key)
     }
 
     fn update(&mut self, key: u32, value: u32) -> Option<u32> {
@@ -352,9 +368,11 @@ pub struct BTree {
 
 impl BTree {
     pub fn new(capacity: usize) -> BTree {
+        let leaf = Rc::new(RefCell::new(Leaf::new(capacity)));
+        leaf.borrow_mut().this = Rc::downgrade(&leaf);
         BTree {
             capacity,
-            root: Some(Rc::new(RefCell::new(Leaf::new(capacity)))),
+            root: Some(leaf),
         }
     }
 
@@ -374,8 +392,15 @@ impl BTree {
         })
     }
 
-    pub fn lookup_range<'a>(&self, from_key: u32, to_key: u32) -> &'a dyn Iterator<Item = u32> {
-        panic!("Not implemented")
+    pub fn lookup_range(&self, from_key: u32, to_key: u32) -> LookupRangeIterator {
+        self.root
+            .as_ref()
+            .map(|root| {
+                let root: &RefCell<dyn Node> = root.borrow();
+                let root: Ref<dyn Node> = root.borrow();
+                root.lookup_range(from_key, to_key)
+            })
+            .unwrap()
     }
 
     pub fn insert(&mut self, key: u32, value: u32) -> bool {
@@ -710,5 +735,46 @@ mod tests {
             assert_eq!(Some(seq[i] * 100), btree.lookup(seq[i]));
         }
         btree.print();
+    }
+
+    #[test]
+    fn leaf_node_lookup_range() {
+        let seq = [10, 15, 13];
+        let btree = validate_insert_and_update(3, &seq);
+        assert_eq!(
+            vec![100, 130, 150],
+            btree.lookup_range(10, 15).collect_vec()
+        );
+        let empty: Vec<u32> = Vec::new();
+
+        assert_eq!(vec![130, 150], btree.lookup_range(13, 15).collect_vec());
+        assert_eq!(vec![100, 130], btree.lookup_range(10, 13).collect_vec());
+        assert_eq!(vec![100], btree.lookup_range(10, 10).collect_vec());
+        assert_eq!(vec![100], btree.lookup_range(0, 10).collect_vec());
+        assert_eq!(vec![150], btree.lookup_range(15, 1000).collect_vec());
+        assert_eq!(vec![130, 150], btree.lookup_range(13, 1000).collect_vec());
+        assert_eq!(empty, btree.lookup_range(16, 100).collect_vec());
+        assert_eq!(empty, btree.lookup_range(1, 9).collect_vec());
+    }
+
+    #[test]
+    fn insert_100_lookup_range() {
+        let seq = [
+            90, 95, 85, 41, 11, 29, 100, 19, 1, 30, 3, 2, 39, 18, 82, 26, 49, 28, 46, 88, 77, 58,
+            35, 54, 61, 16, 91, 9, 40, 48, 94, 45, 99, 69, 38, 57, 65, 13, 7, 55, 22, 86, 71, 34,
+            50, 15, 98, 10, 36, 96, 79, 92, 62, 21, 89, 43, 78, 93, 44, 20, 72, 56, 68, 17, 6, 42,
+            73, 64, 70, 75, 5, 76, 80, 74, 8, 63, 60, 59, 31, 25, 27, 33, 32, 14, 52, 24, 4, 47,
+            81, 97, 53, 51, 84, 67, 83, 12, 23, 37, 87, 66,
+        ];
+
+        let btree = validate_insert_and_update(5, &seq);
+        assert_eq!(
+            vec![130, 140, 150],
+            btree.lookup_range(13, 15).collect_vec()
+        );
+        assert_eq!(
+            vec![800, 810, 820, 830, 840, 850, 860],
+            btree.lookup_range(80, 86).collect_vec()
+        );
     }
 }

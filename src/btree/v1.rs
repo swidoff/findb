@@ -193,64 +193,48 @@ impl BTree {
         });
         file.write(&file_header_buf.buf)?;
 
-        let mut leaf_count = 0;
-        let mut leaf_bufs = [
-            PageBuffer::new(page_size, LEAF_TYPE),
-            PageBuffer::new(page_size, LEAF_TYPE),
-        ];
-        let key_capacity = leaf_bufs[0].key_capacity();
+        let mut leaf_buf = PageBuffer::new(page_size, LEAF_TYPE);
+        let key_capacity = leaf_buf.key_capacity();
 
         let mut page_count = 0;
         let mut source_empty = false;
         let mut lineage: Vec<PageBuffer> = Vec::new();
+
         while !source_empty {
             let mut key_count = 0;
-            {
-                let leaf_buf = &mut leaf_bufs[leaf_count % 2];
-                leaf_buf.clear();
-                let page_source = source.take(key_capacity);
-                for (index, (key, value)) in page_source.enumerate() {
-                    key_count += 1;
-                    leaf_buf.set_key(index, key);
-                    leaf_buf.set_value(index, value);
-                    leaf_buf.set_num_keys(key_count as u32)
-                }
-            }
+            leaf_buf.clear();
 
-            if leaf_count > 0 {
-                let leaf_buf = &mut leaf_bufs[(leaf_count) - 1 % 2];
-                leaf_buf.set_rightmost_page_num(page_count - 1);
-                file.write(&leaf_buf.buf)?;
-            }
-
-            {
-                let leaf_buf = &leaf_bufs[leaf_count % 2];
-                let last_key = leaf_buf.get_key((leaf_buf.num_keys() - 1) as usize);
-                match BTree::add_to_parent(last_key, &mut page_count, 0, &mut lineage, page_size) {
-                    Some(filled_pages) => {
-                        for page_buf in filled_pages.iter().rev() {
-                            file.write(&page_buf.buf)?;
-                        }
-                    }
-                    None => {}
-                }
+            let page_source = source.take(key_capacity);
+            for (index, (key, value)) in page_source.enumerate() {
+                key_count += 1;
+                leaf_buf.set_key(index, key);
+                leaf_buf.set_value(index, value);
+                leaf_buf.set_num_keys(key_count as u32)
             }
 
             if key_count < key_capacity {
-                if key_count > 0 {
-                    let page_buf = &mut leaf_bufs[leaf_count % 2];
-                    file.write(&page_buf.buf)?;
+                if key_count == 0 {
+                    break;
                 }
                 source_empty = true;
             }
 
-            leaf_count += 1;
+            let last_key = leaf_buf.get_key((leaf_buf.num_keys() - 1) as usize);
+            let filled_inner_pages =
+                BTree::add_to_parent(last_key, &mut page_count, 0, &mut lineage, page_size);
+            leaf_buf.set_rightmost_page_num(page_count + 1);
+            file.write(&leaf_buf.buf)?;
+
+            if filled_inner_pages.is_some() {
+                for page_buf in filled_inner_pages.unwrap().iter().rev() {
+                    file.write(&page_buf.buf)?;
+                }
+            }
             page_count += 1;
         }
 
         for page_buf in lineage.iter() {
             file.write(&page_buf.buf)?;
-            page_count += 1;
         }
 
         file_header_buf.set(FileHeader {
@@ -260,7 +244,6 @@ impl BTree {
         });
         file.seek(SeekFrom::Start(0))?;
         file.write(&file_header_buf.buf)?;
-
         return Ok(());
     }
 
@@ -290,6 +273,7 @@ impl BTree {
             } else {
                 let new_inner_buf = PageBuffer::new(page_size, INNER_TYPE);
                 lineage.push(new_inner_buf);
+
                 let mut old_inner_buf = lineage.swap_remove(index);
                 old_inner_buf.set_rightmost_page_num(*page_number);
 

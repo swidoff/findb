@@ -204,6 +204,7 @@ impl BTree {
             let mut key_count = 0;
             leaf_buf.clear();
 
+            // Read up to a leaf's worth of keys and values.
             let page_source = source.take(key_capacity);
             for (index, (key, value)) in page_source.enumerate() {
                 key_count += 1;
@@ -212,6 +213,7 @@ impl BTree {
                 leaf_buf.set_num_keys(key_count as u32)
             }
 
+            // If we were unable to fill a leaf, this is the last iteration. Don't continue if the iterator was empty.
             if key_count < key_capacity {
                 if key_count == 0 {
                     break;
@@ -219,12 +221,17 @@ impl BTree {
                 source_empty = true;
             }
 
+            // Add the last key and the page number of the parent node, receiving any filled inner nodes.
             let last_key = leaf_buf.get_key((leaf_buf.num_keys() - 1) as usize);
             let filled_inner_pages =
                 BTree::add_to_parent(last_key, &mut page_count, 0, &mut lineage, page_size);
+
+            // Page count now includes the filled inner pages to be written. The next page will be the next leaf.
+            // We can set the right-pointer on the leaf to the number of the next page.
             leaf_buf.set_rightmost_page_num(page_count + 1);
             file.write(&leaf_buf.buf)?;
 
+            // Write out the filled inner pages.
             if filled_inner_pages.is_some() {
                 for page_buf in filled_inner_pages.unwrap().iter().rev() {
                     file.write(&page_buf.buf)?;
@@ -233,8 +240,19 @@ impl BTree {
             page_count += 1;
         }
 
-        for page_buf in lineage.iter() {
+        // Write out any incomplete parent nodes, pushing its page num to its parent.
+        for index in 0..lineage.len() {
+            let page_buf = &lineage[index];
             file.write(&page_buf.buf)?;
+            page_count += 1;
+
+            let parent_buf = &mut lineage[index];
+            let num_parent_keys = parent_buf.num_keys() as usize;
+            if num_parent_keys < parent_buf.key_capacity() {
+                parent_buf.set_page_number(num_parent_keys, page_count)
+            } else {
+                parent_buf.set_rightmost_page_num(page_count)
+            }
         }
 
         file_header_buf.set(FileHeader {

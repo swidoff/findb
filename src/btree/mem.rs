@@ -164,13 +164,13 @@ pub struct LookupRangeIterator {
 }
 
 impl LookupRangeIterator {
-    fn empty() -> LookupRangeIterator {
-        LookupRangeIterator {
-            leaf: Weak::new(),
-            index: 0,
-            to_key: 0,
-        }
-    }
+    // fn empty() -> LookupRangeIterator {
+    //     LookupRangeIterator {
+    //         leaf: Weak::new(),
+    //         index: 0,
+    //         to_key: 0,
+    //     }
+    // }
 }
 
 impl Iterator for LookupRangeIterator {

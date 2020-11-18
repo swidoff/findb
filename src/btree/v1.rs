@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -12,6 +13,7 @@ pub type Timestamp = u32;
 pub type PageNumber = u32;
 pub type Value = f32;
 
+#[derive(PartialEq, PartialOrd)]
 pub struct Key {
     asset_id: AssetId,
     date: Date,
@@ -96,6 +98,10 @@ impl PageBuffer {
         PageBuffer { buf }
     }
 
+    fn page_type(&self) -> u32 {
+        read_u32(&self.buf[0..])
+    }
+
     fn num_keys(&self) -> u32 {
         read_u32(&self.buf[size_of::<u32>()..])
     }
@@ -143,7 +149,7 @@ impl PageBuffer {
         self.key_offset(index) + size_of::<Key>()
     }
 
-    fn get_value(&self, index: usize) -> Value {
+    fn value(&self, index: usize) -> Value {
         read_f32(&self.buf[self.value_offset(index)..])
     }
 
@@ -152,7 +158,7 @@ impl PageBuffer {
         write_f32(&mut self.buf[offset..], value)
     }
 
-    fn get_page_number(&self, index: usize) -> PageNumber {
+    fn page_number(&self, index: usize) -> PageNumber {
         read_u32(&self.buf[self.value_offset(index)..])
     }
 
@@ -165,6 +171,25 @@ impl PageBuffer {
         for i in 0..self.buf.capacity() {
             self.buf[i] = 0;
         }
+    }
+
+    fn index_of(&self, key: &Key) -> u32 {
+        let mut min = 0;
+        let mut max = self.num_keys();
+
+        while min < max {
+            let mut midpoint = (max + min) / 2;
+            let midpoint_key = self.get_key(midpoint as usize);
+            match (*key).partial_cmp(&midpoint_key).unwrap() {
+                Ordering::Greater => min = midpoint + 1,
+                Ordering::Less => max = midpoint,
+                Ordering::Equal => {
+                    min = midpoint;
+                    break;
+                }
+            }
+        }
+        min
     }
 }
 
@@ -210,7 +235,8 @@ impl BTree {
                 key_count += 1;
                 leaf_buf.set_key(index, key);
                 leaf_buf.set_value(index, value);
-                leaf_buf.set_num_keys(key_count as u32)
+                leaf_buf.set_num_keys(key_count as u32);
+                leaf_buf.set_num_keys(key_count as u32);
             }
 
             // If we were unable to fill a leaf, this is the last iteration. Don't continue if the iterator was empty.
@@ -228,7 +254,9 @@ impl BTree {
 
             // Page count now includes the filled inner pages to be written. The next page will be the next leaf.
             // We can set the right-pointer on the leaf to the number of the next page.
-            leaf_buf.set_rightmost_page_num(page_count + 1);
+            if !source_empty {
+                leaf_buf.set_rightmost_page_num(page_count + 1);
+            }
             file.write(&leaf_buf.buf)?;
 
             // Write out the filled inner pages.
@@ -308,8 +336,40 @@ impl BTree {
         }
     }
 
-    pub fn query(&self, _query: &Query) -> QueryResultIterator {
-        QueryResultIterator {}
+    pub fn query(&mut self, query: &Query) -> std::io::Result<QueryResultIterator> {
+        let mut file_header_buf = FileHeaderBuffer::from_file(&mut self.file)?;
+        let file_header = file_header_buf.get();
+        let page_size = file_header.page_size;
+        self.file.seek(SeekFrom::Start(
+            (page_size * file_header.root_offset) as u64,
+        ))?;
+
+        let mut page_buf = PageBuffer::new(page_size, INNER_TYPE);
+        self.file.read(&mut page_buf.buf)?;
+
+        let key = Key {
+            asset_id: query.asset_ids[0],
+            date: query.start_date,
+            timestamp: query.timestamp,
+        };
+        while page_buf.page_type() == LEAF_TYPE {
+            let index = page_buf.index_of(&key);
+            let mut page_num = 0;
+
+            if index < page_buf.num_keys() {
+                page_num = page_buf.page_number(index as usize);
+            } else {
+                page_num = page_buf.rightmost_page_num();
+            }
+
+            self.file
+                .seek(SeekFrom::Start((page_size * page_num) as u64))?;
+            self.file.read(&mut page_buf.buf)?;
+        }
+
+        let index = page_buf.index_of(&key);
+
+        Ok(QueryResultIterator {})
     }
 
     pub fn bulk_query(&self, _queries: &Vec<Query>) -> QueryResultIterator {

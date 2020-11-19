@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Error, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
 
 /// Super simple on-disk btree implementation with fixed-size keys and a single floating point value contained  
@@ -22,7 +22,7 @@ pub struct Key {
 
 pub struct Query {
     id: usize,
-    asset_ids: Vec<AssetId>,
+    asset_id: AssetId,
     start_date: Date,
     end_date: Date,
     timestamp: Timestamp,
@@ -34,20 +34,10 @@ pub struct QueryResult {
     value: Value,
 }
 
-pub struct QueryResultIterator {}
-
-impl Iterator for QueryResultIterator {
-    type Item = QueryResult;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        unimplemented!()
-    }
-}
-
 struct FileHeader {
     page_size: u32,
     page_count: u32,
-    root_offset: u32,
+    root_page_number: PageNumber,
 }
 
 struct FileHeaderBuffer {
@@ -69,14 +59,17 @@ impl FileHeaderBuffer {
     fn set(&mut self, header: FileHeader) {
         write_u32(&mut self.buf[0..], header.page_size);
         write_u32(&mut self.buf[size_of::<u32>()..], header.page_count);
-        write_u32(&mut self.buf[2 * size_of::<u32>()..], header.root_offset);
+        write_u32(
+            &mut self.buf[2 * size_of::<u32>()..],
+            header.root_page_number,
+        );
     }
 
     fn get(&self) -> FileHeader {
         FileHeader {
             page_size: read_u32(&self.buf[0..]),
             page_count: read_u32(&self.buf[size_of::<u32>()..]),
-            root_offset: read_u32(&self.buf[2 * size_of::<u32>()..]),
+            root_page_number: read_u32(&self.buf[2 * size_of::<u32>()..]),
         }
     }
 }
@@ -193,13 +186,48 @@ impl PageBuffer {
     }
 }
 
-pub struct BTree {
+struct FileBuffer {
     file: File,
+    file_header: FileHeader,
+    page_buf: PageBuffer,
+}
+
+impl FileBuffer {
+    fn new(file: File) -> std::io::Result<FileBuffer> {
+        let mut file = file;
+        let file_header_buf = FileHeaderBuffer::from_file(&mut file)?;
+        let file_header = file_header_buf.get();
+        let page_size = file_header.page_size;
+        let page_buf = PageBuffer::new(page_size, INNER_TYPE);
+        Ok(FileBuffer {
+            file,
+            file_header,
+            page_buf,
+        })
+    }
+
+    fn read_root_page(&mut self) -> std::io::Result<&PageBuffer> {
+        self.read_page(self.file_header.root_page_number)
+    }
+
+    fn read_page(&mut self, page_number: u32) -> std::io::Result<&PageBuffer> {
+        self.file.seek(SeekFrom::Start(
+            (self.file_header.page_size * page_number) as u64,
+        ))?;
+        self.file.read(&mut self.page_buf.buf)?;
+        return Ok(&self.page_buf);
+    }
+}
+
+pub struct BTree {
+    file_buf: FileBuffer,
 }
 
 impl BTree {
-    pub fn from_file(file: File) -> BTree {
-        BTree { file }
+    pub fn from_file(file: File) -> std::io::Result<BTree> {
+        Ok(BTree {
+            file_buf: FileBuffer::new(file)?,
+        })
     }
 
     /// Writes a new BTree file from an iterator that returns the keys and values to be loaded in their key sorted
@@ -214,7 +242,7 @@ impl BTree {
         file_header_buf.set(FileHeader {
             page_size,
             page_count: 0,
-            root_offset: 0,
+            root_page_number: 0,
         });
         file.write(&file_header_buf.buf)?;
 
@@ -268,7 +296,7 @@ impl BTree {
             page_count += 1;
         }
 
-        // Write out any incomplete parent nodes, pushing its page num to its parent.
+        // Write out any incomplete parent nodes, pushing its page number to its parent.
         for index in 0..lineage.len() {
             let page_buf = &lineage[index];
             file.write(&page_buf.buf)?;
@@ -286,7 +314,7 @@ impl BTree {
         file_header_buf.set(FileHeader {
             page_size,
             page_count: page_count as u32,
-            root_offset: (page_count - 1) as u32,
+            root_page_number: (page_count - 1) as u32,
         });
         file.seek(SeekFrom::Start(0))?;
         file.write(&file_header_buf.buf)?;
@@ -336,19 +364,11 @@ impl BTree {
         }
     }
 
-    pub fn query(&mut self, query: &Query) -> std::io::Result<QueryResultIterator> {
-        let mut file_header_buf = FileHeaderBuffer::from_file(&mut self.file)?;
-        let file_header = file_header_buf.get();
-        let page_size = file_header.page_size;
-        self.file.seek(SeekFrom::Start(
-            (page_size * file_header.root_offset) as u64,
-        ))?;
-
-        let mut page_buf = PageBuffer::new(page_size, INNER_TYPE);
-        self.file.read(&mut page_buf.buf)?;
+    pub fn query(&mut self, query: Query) -> std::io::Result<QueryResultIterator> {
+        let mut page_buf = self.file_buf.read_root_page()?;
 
         let key = Key {
-            asset_id: query.asset_ids[0],
+            asset_id: query.asset_id,
             date: query.start_date,
             timestamp: query.timestamp,
         };
@@ -362,18 +382,92 @@ impl BTree {
                 page_num = page_buf.rightmost_page_num();
             }
 
-            self.file
-                .seek(SeekFrom::Start((page_size * page_num) as u64))?;
-            self.file.read(&mut page_buf.buf)?;
+            page_buf = self.file_buf.read_page(page_num)?;
         }
 
-        let index = page_buf.index_of(&key);
+        let key_index = page_buf.index_of(&key);
 
-        Ok(QueryResultIterator {})
+        Ok(QueryResultIterator {
+            file_buf: &mut self.file_buf,
+            key_index,
+            query,
+        })
     }
 
-    pub fn bulk_query(&self, _queries: &Vec<Query>) -> QueryResultIterator {
-        QueryResultIterator {}
+    // pub fn bulk_query(&self, _queries: &Vec<Query>) -> QueryResultIterator {
+    //     QueryResultIterator {}
+    // }
+}
+
+pub struct QueryResultIterator<'a> {
+    file_buf: &'a mut FileBuffer,
+    key_index: u32,
+    query: Query,
+}
+
+enum QueryResultIteratorState {
+    Continue(Option<QueryResult>),
+    YieldResult(Option<QueryResult>),
+}
+
+impl<'a> Iterator for QueryResultIterator<'a> {
+    type Item = std::io::Result<QueryResult>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut state = self.iterate(None);
+
+        while let Ok(QueryResultIteratorState::Continue(prior_result)) = state {
+            state = self.iterate(prior_result)
+        }
+
+        match state {
+            Ok(QueryResultIteratorState::YieldResult(result)) => result.map(|v| Ok(v)),
+            Err(e) => Some(Err(e)),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> QueryResultIterator<'a> {
+    fn iterate(
+        &mut self,
+        prior_result: Option<QueryResult>,
+    ) -> std::io::Result<QueryResultIteratorState> {
+        let page_buf = &self.file_buf.page_buf;
+        let new_state = if page_buf.page_type() == INNER_TYPE {
+            QueryResultIteratorState::YieldResult(prior_result)
+        } else if self.key_index > page_buf.num_keys() {
+            let next_page_number = page_buf.rightmost_page_num();
+            if next_page_number == 0 {
+                QueryResultIteratorState::YieldResult(prior_result)
+            } else {
+                self.file_buf.read_page(next_page_number)?;
+                self.key_index = 0;
+                QueryResultIteratorState::Continue(prior_result)
+            }
+        } else {
+            let key = page_buf.get_key(self.key_index as usize);
+            if key.asset_id != self.query.asset_id || key.date > self.query.end_date {
+                QueryResultIteratorState::YieldResult(prior_result)
+            } else {
+                let new_state = match prior_result {
+                    Some(prior_result) if key.date > prior_result.key.date => {
+                        QueryResultIteratorState::YieldResult(Some(prior_result))
+                    }
+                    _ if key.timestamp >= self.query.timestamp => {
+                        QueryResultIteratorState::Continue(Some(QueryResult {
+                            id: self.query.id,
+                            key,
+                            value: page_buf.value(self.key_index as usize),
+                        }))
+                    }
+                    _ => QueryResultIteratorState::Continue(None),
+                };
+                self.key_index += 1;
+                new_state
+            }
+        };
+        Ok(new_state)
     }
 }
 

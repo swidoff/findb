@@ -328,7 +328,7 @@ impl BTree {
 
         while peekable_source.peek().is_some() {
             if last_leaf_page_num < u32::max_value() {
-                let last_key = leaf_buf.key((leaf_buf.num_keys() - 1) as usize);
+                let last_key = leaf_buf.key(0);
                 match BTree::add_to_parent(last_key, &mut page_count, 0, &mut lineage, page_size) {
                     Some(filled_inner_pages) => {
                         for page_buf in filled_inner_pages.iter().rev() {
@@ -362,13 +362,16 @@ impl BTree {
 
         // Write out any incomplete parent nodes, pushing its page number to its parent.
         for index in 0..lineage.len() {
+            let last_key = leaf_buf.key(0);
             let page_buf = &mut lineage[index];
-            let num_keys = page_buf.num_keys() as usize;
-            if num_keys < page_buf.key_capacity() {
-                page_buf.set_page_number(num_keys, page_count - 1)
+            let num_keys = page_buf.num_keys();
+            page_buf.set_key(num_keys as usize, last_key);
+            if num_keys < ((key_capacity - 1) as u32) {
+                page_buf.set_page_number((num_keys + 1) as usize, page_count - 1);
             } else {
-                page_buf.set_extra_page_num(page_count - 1)
+                page_buf.set_extra_page_num(page_count - 1);
             }
+            page_buf.set_num_keys(num_keys + 1);
             println!("{}", page_buf.page_type());
             file.write(&page_buf.buf)?;
             // page_buf.print();
@@ -395,9 +398,7 @@ impl BTree {
     ) -> Option<Vec<PageBuffer>> {
         if index == lineage.len() {
             let mut inner_buf = PageBuffer::new(page_size, INNER_TYPE);
-            inner_buf.set_key(0, key);
             inner_buf.set_page_number(0, *page_number);
-            inner_buf.set_num_keys(1);
             lineage.push(inner_buf);
             None
         } else {
@@ -406,15 +407,18 @@ impl BTree {
             if num_keys < (key_capacity as u32) {
                 let inner_buf = &mut lineage[index];
                 inner_buf.set_key(num_keys as usize, key);
-                inner_buf.set_page_number(num_keys as usize, *page_number);
+                if num_keys < ((key_capacity - 1) as u32) {
+                    inner_buf.set_page_number((num_keys + 1) as usize, *page_number);
+                } else {
+                    inner_buf.set_extra_page_num(*page_number);
+                }
                 inner_buf.set_num_keys(num_keys + 1);
                 None
             } else {
                 let new_inner_buf = PageBuffer::new(page_size, INNER_TYPE);
                 lineage.push(new_inner_buf);
 
-                let mut old_inner_buf = lineage.swap_remove(index);
-                old_inner_buf.set_extra_page_num(*page_number);
+                let old_inner_buf = lineage.swap_remove(index);
 
                 *page_number += 1;
                 let res = BTree::add_to_parent(key, page_number, index + 1, lineage, page_size);

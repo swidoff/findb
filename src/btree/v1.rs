@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::cmp::{min, Ordering};
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -6,6 +6,12 @@ use std::mem::size_of;
 
 /// Super simple on-disk btree implementation with fixed-size keys and a single floating point value contained  
 /// inside the node itself rather than in a separate file.
+
+/// TODO: Perform iteration in reverse, from largest to smallest date. This allows for a max_periods more naturally.
+/// The leaf "rightmost-offset" will be a back pointer, rather than a forward pointer.
+///
+/// For ts can return the first encountered where the key timestamp is less than the query timestamp. Can terminate
+/// iteration after max_periods have been yielded.
 
 pub type AssetId = u32;
 pub type Date = u32;
@@ -136,11 +142,11 @@ impl PageBuffer {
         self.set_header_field(1, num_keys);
     }
 
-    fn rightmost_page_num(&self) -> u32 {
+    fn extra_page_num(&self) -> u32 {
         self.header_field(2)
     }
 
-    fn set_rightmost_page_num(&mut self, page_num: u32) {
+    fn set_extra_page_num(&mut self, page_num: u32) {
         self.set_header_field(2, page_num);
     }
 
@@ -210,7 +216,11 @@ impl PageBuffer {
                 Ordering::Greater => min = midpoint + 1,
                 Ordering::Less => max = midpoint,
                 Ordering::Equal => {
-                    min = midpoint;
+                    if self.page_type() == LEAF_TYPE {
+                        min = midpoint;
+                    } else {
+                        min = midpoint + 1;
+                    }
                     break;
                 }
             }
@@ -222,8 +232,13 @@ impl PageBuffer {
         let page_type = self.page_type();
         println!("Page Type: {}", page_type);
         println!("Num Keys: {}", self.num_keys());
-        println!("Rightmost Page Num: {}", self.rightmost_page_num());
-        for i in 0..self.num_keys() {
+        println!("Rightmost Page Num: {}", self.extra_page_num());
+        let max_keys = if page_type == LEAF_TYPE {
+            self.num_keys()
+        } else {
+            min(self.num_keys() + 1, self.key_capacity() as u32)
+        };
+        for i in 0..max_keys {
             if page_type == LEAF_TYPE {
                 println!(
                     "Index {}: ({:?}, {})",
@@ -307,6 +322,7 @@ impl BTree {
         let key_capacity = leaf_buf.key_capacity();
 
         let mut page_count = 0;
+        let mut last_leaf_page_num = u32::max_value();
         let mut source_empty = false;
         let mut lineage: Vec<PageBuffer> = Vec::new();
 
@@ -321,54 +337,54 @@ impl BTree {
                 leaf_buf.set_value(index, value);
                 leaf_buf.set_num_keys(key_count as u32);
             }
+            leaf_buf.set_extra_page_num(last_leaf_page_num);
+            last_leaf_page_num = page_count;
 
-            // If we were unable to fill a leaf, this is the last iteration. Don't continue if the iterator was empty.
-            if key_count < key_capacity {
-                if key_count == 0 {
-                    break;
+            if key_count > 0 {
+                file.write(&leaf_buf.buf)?;
+
+                // If we were unable to fill a leaf, this is the last iteration. Don't continue if the iterator was empty.
+                if key_count < key_capacity {
+                    source_empty = true;
+                } else {
+                    // Add the last key and the page number of the parent node, receiving any filled inner nodes.
+                    let last_key = leaf_buf.key((leaf_buf.num_keys() - 1) as usize);
+                    match BTree::add_to_parent(
+                        last_key,
+                        &mut page_count,
+                        0,
+                        &mut lineage,
+                        page_size,
+                    ) {
+                        Some(filled_inner_pages) => {
+                            for page_buf in filled_inner_pages.iter().rev() {
+                                file.write(&page_buf.buf)?;
+                                // page_buf.print();
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    leaf_buf.clear();
                 }
+                page_count += 1;
+            } else {
                 source_empty = true;
             }
-
-            // Add the last key and the page number of the parent node, receiving any filled inner nodes.
-            let last_key = leaf_buf.key((leaf_buf.num_keys() - 1) as usize);
-            let filled_inner_pages =
-                BTree::add_to_parent(last_key, &mut page_count, 0, &mut lineage, page_size);
-
-            // Page count now includes the filled inner pages to be written. The next page will be the next leaf.
-            // We can set the right-pointer on the leaf to the number of the next page.
-            if !source_empty {
-                leaf_buf.set_rightmost_page_num(page_count + 1);
-            }
-            file.write(&leaf_buf.buf)?;
-            // leaf_buf.print();
-
-            // Write out the filled inner pages.
-            if filled_inner_pages.is_some() {
-                for page_buf in filled_inner_pages.unwrap().iter().rev() {
-                    file.write(&page_buf.buf)?;
-                    // page_buf.print();
-                }
-            }
-            page_count += 1;
-            leaf_buf.clear();
         }
 
         // Write out any incomplete parent nodes, pushing its page number to its parent.
         for index in 0..lineage.len() {
-            let page_buf = &lineage[index];
+            let page_buf = &mut lineage[index];
+            let num_keys = page_buf.num_keys() as usize;
+            if num_keys < page_buf.key_capacity() {
+                page_buf.set_page_number(num_keys, page_count - 1)
+            } else {
+                page_buf.set_extra_page_num(page_count - 1)
+            }
+            println!("{}", page_buf.page_type());
             file.write(&page_buf.buf)?;
             // page_buf.print();
-
-            if index < lineage.len() - 1 {
-                let parent_buf = &mut lineage[index + 1];
-                let num_parent_keys = parent_buf.num_keys() as usize;
-                if num_parent_keys < parent_buf.key_capacity() {
-                    parent_buf.set_page_number(num_parent_keys, page_count)
-                } else {
-                    parent_buf.set_rightmost_page_num(page_count)
-                }
-            }
 
             page_count += 1;
         }
@@ -411,7 +427,7 @@ impl BTree {
                 lineage.push(new_inner_buf);
 
                 let mut old_inner_buf = lineage.swap_remove(index);
-                old_inner_buf.set_rightmost_page_num(*page_number);
+                old_inner_buf.set_extra_page_num(*page_number);
 
                 *page_number += 1;
                 let res = BTree::add_to_parent(key, page_number, index + 1, lineage, page_size);
@@ -431,26 +447,27 @@ impl BTree {
 
         let key = Key {
             asset_id: query.asset_id,
-            date: query.start_date,
+            date: query.end_date,
             timestamp: query.timestamp,
         };
         while page_buf.page_type() == INNER_TYPE {
-            let index = page_buf.index_of(&key);
-            let page_num = if index < page_buf.num_keys() {
-                page_buf.page_number(index as usize)
+            let index = page_buf.index_of(&key) as usize;
+            let page_num = if index < page_buf.key_capacity() {
+                page_buf.page_number(index)
             } else {
-                page_buf.rightmost_page_num()
+                page_buf.extra_page_num()
             };
 
             page_buf = self.file_buf.read_page(page_num)?;
         }
 
-        let key_index = page_buf.index_of(&key);
+        let key_index = min(page_buf.index_of(&key), page_buf.num_keys() - 1);
 
         Ok(QueryResultIterator {
             file_buf: &mut self.file_buf,
-            key_index,
+            key_index: Some(key_index),
             query,
+            last_yielded_date: None,
         })
     }
 
@@ -459,9 +476,10 @@ impl BTree {
         println!("Header: {:?}", file_header);
         println!("---");
         for i in 0..file_header.page_count {
+            println!("Page number: {}", i);
             self.file_buf.read_page(i)?.print();
+            println!("---");
         }
-        println!("---");
         Ok(())
     }
 
@@ -472,12 +490,13 @@ impl BTree {
 
 pub struct QueryResultIterator<'a> {
     file_buf: &'a mut FileBuffer,
-    key_index: u32,
+    key_index: Option<u32>,
     query: Query,
+    last_yielded_date: Option<u32>,
 }
 
 enum QueryResultIteratorState {
-    Continue(Option<QueryResult>),
+    Continue,
     YieldResult(Option<QueryResult>),
 }
 
@@ -485,14 +504,18 @@ impl<'a> Iterator for QueryResultIterator<'a> {
     type Item = std::io::Result<QueryResult>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut state = self.iterate(None);
+        let mut state = self.iterate();
 
-        while let Ok(QueryResultIteratorState::Continue(prior_result)) = state {
-            state = self.iterate(prior_result)
+        while let Ok(QueryResultIteratorState::Continue) = state {
+            state = self.iterate()
         }
 
         match state {
-            Ok(QueryResultIteratorState::YieldResult(result)) => result.map(|v| Ok(v)),
+            Ok(QueryResultIteratorState::YieldResult(Some(result))) => {
+                self.last_yielded_date = Some(result.key.date);
+                Some(Ok(result))
+            }
+            Ok(QueryResultIteratorState::YieldResult(None)) => None,
             Err(e) => Some(Err(e)),
             _ => None,
         }
@@ -500,45 +523,49 @@ impl<'a> Iterator for QueryResultIterator<'a> {
 }
 
 impl<'a> QueryResultIterator<'a> {
-    fn iterate(
-        &mut self,
-        prior_result: Option<QueryResult>,
-    ) -> std::io::Result<QueryResultIteratorState> {
-        let page_buf = &self.file_buf.page_buf;
-        let new_state = if page_buf.page_type() == INNER_TYPE {
-            QueryResultIteratorState::YieldResult(prior_result)
-        } else if self.key_index >= page_buf.num_keys() {
-            let next_page_number = page_buf.rightmost_page_num();
-            if next_page_number == 0 {
-                QueryResultIteratorState::YieldResult(prior_result)
-            } else {
-                self.file_buf.read_page(next_page_number)?;
-                self.key_index = 0;
-                QueryResultIteratorState::Continue(prior_result)
+    fn iterate(&mut self) -> std::io::Result<QueryResultIteratorState> {
+        match self.key_index {
+            None if self.file_buf.page_buf.extra_page_num() == u32::max_value() => {
+                Ok(QueryResultIteratorState::YieldResult(None))
             }
-        } else {
-            let key = page_buf.key(self.key_index as usize);
-            if key.asset_id != self.query.asset_id || key.date > self.query.end_date {
-                QueryResultIteratorState::YieldResult(prior_result)
-            } else {
-                let new_state = match prior_result {
-                    Some(prior_result) if key.date > prior_result.key.date => {
-                        QueryResultIteratorState::YieldResult(Some(prior_result))
-                    }
-                    _ if key.timestamp >= self.query.timestamp => {
-                        QueryResultIteratorState::Continue(Some(QueryResult {
+            None => {
+                let page_num = self.file_buf.page_buf.extra_page_num();
+                self.file_buf.read_page(page_num)?;
+
+                let num_keys = self.file_buf.page_buf.num_keys();
+                self.key_index = Some(num_keys - 1);
+                Ok(QueryResultIteratorState::Continue)
+            }
+            Some(key_index) => {
+                let page_buf = &self.file_buf.page_buf;
+                let key = page_buf.key(key_index as usize);
+                if key.asset_id < self.query.asset_id || key.date < self.query.start_date {
+                    Ok(QueryResultIteratorState::YieldResult(None))
+                } else {
+                    self.key_index = if key_index == 0 {
+                        None
+                    } else {
+                        Some(key_index - 1)
+                    };
+                    match self.last_yielded_date {
+                        None if key.asset_id > self.query.asset_id
+                            || key.date > self.query.end_date
+                            || key.timestamp > self.query.timestamp =>
+                        {
+                            Ok(QueryResultIteratorState::Continue)
+                        }
+                        Some(d) if d == key.date || key.timestamp > self.query.timestamp => {
+                            Ok(QueryResultIteratorState::Continue)
+                        }
+                        _ => Ok(QueryResultIteratorState::YieldResult(Some(QueryResult {
                             id: self.query.id,
                             key,
-                            value: page_buf.value(self.key_index as usize),
-                        }))
+                            value: page_buf.value(key_index as usize),
+                        }))),
                     }
-                    _ => QueryResultIteratorState::Continue(None),
-                };
-                self.key_index += 1;
-                new_state
+                }
             }
-        };
-        Ok(new_state)
+        }
     }
 }
 
@@ -566,6 +593,7 @@ mod tests {
     use itertools::Itertools;
     use std::fs;
     use std::fs::File;
+    use std::io::Error;
 
     #[test]
     fn test_small() {
@@ -601,25 +629,60 @@ mod tests {
 
         let file = File::open(path).unwrap();
         let mut btree = BTree::from_file(file).unwrap();
-        // println!();
-        // btree.print();
+        btree.print();
 
-        let query = Query {
-            id: 0,
-            asset_id: 0,
-            start_date: 20200131,
-            end_date: 20200131,
-            timestamp: 20,
-        };
-        let mut result = btree.query(query).unwrap().collect_vec();
-        assert_eq!(result.len(), 1);
-        assert_eq!(
-            result.pop().unwrap().unwrap(),
-            QueryResult {
+        check_query(
+            &mut btree,
+            Query {
                 id: 0,
-                key: Key::new(0, 20200131, 20),
-                value: 3.0
-            }
+                asset_id: 0,
+                start_date: 20200131,
+                end_date: 20200131,
+                timestamp: 20,
+            },
+            &[3.0],
         );
+        check_query(
+            &mut btree,
+            Query {
+                id: 0,
+                asset_id: 0,
+                start_date: 20200131,
+                end_date: 20200131,
+                timestamp: 15,
+            },
+            &[2.0],
+        );
+        check_query(
+            &mut btree,
+            Query {
+                id: 0,
+                asset_id: 0,
+                start_date: 20200115,
+                end_date: 20200405,
+                timestamp: 20,
+            },
+            &[120.0, 12.0, 3.0],
+        );
+        check_query(
+            &mut btree,
+            Query {
+                id: 0,
+                asset_id: 1,
+                start_date: 20200315,
+                end_date: 20200515,
+                timestamp: 21,
+            },
+            &[2200.0, 220.0],
+        );
+    }
+
+    fn check_query(btree: &mut BTree, query: Query, expected: &[f32]) {
+        let actual = btree.query(query).unwrap().collect_vec();
+        assert_eq!(actual.len(), expected.len());
+
+        for (i, actual_result) in actual.iter().enumerate() {
+            assert_eq!(actual_result.as_ref().unwrap().value, expected[i]);
+        }
     }
 }

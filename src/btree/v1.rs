@@ -323,55 +323,42 @@ impl BTree {
 
         let mut page_count = 0;
         let mut last_leaf_page_num = u32::max_value();
-        let mut source_empty = false;
         let mut lineage: Vec<PageBuffer> = Vec::new();
+        let mut peekable_source = source.peekable();
 
-        while !source_empty {
-            let mut key_count = 0;
+        while peekable_source.peek().is_some() {
+            if last_leaf_page_num < u32::max_value() {
+                let last_key = leaf_buf.key((leaf_buf.num_keys() - 1) as usize);
+                match BTree::add_to_parent(last_key, &mut page_count, 0, &mut lineage, page_size) {
+                    Some(filled_inner_pages) => {
+                        for page_buf in filled_inner_pages.iter().rev() {
+                            file.write(&page_buf.buf)?;
+                        }
+                    }
+                    _ => {}
+                }
+                page_count += 1;
+                leaf_buf.clear();
+            }
 
             // Read up to a leaf's worth of keys and values.
-            let page_source = source.take(key_capacity);
-            for (index, (key, value)) in page_source.enumerate() {
-                key_count += 1;
-                leaf_buf.set_key(index, key);
-                leaf_buf.set_value(index, value);
-                leaf_buf.set_num_keys(key_count as u32);
+            let mut key_index = 0;
+            while key_index < key_capacity {
+                match peekable_source.next() {
+                    None => break,
+                    Some((key, value)) => {
+                        leaf_buf.set_key(key_index, key);
+                        leaf_buf.set_value(key_index, value);
+                        key_index += 1;
+                        leaf_buf.set_num_keys(key_index as u32);
+                    }
+                }
             }
             leaf_buf.set_extra_page_num(last_leaf_page_num);
             last_leaf_page_num = page_count;
-
-            if key_count > 0 {
-                file.write(&leaf_buf.buf)?;
-
-                // If we were unable to fill a leaf, this is the last iteration. Don't continue if the iterator was empty.
-                if key_count < key_capacity {
-                    source_empty = true;
-                } else {
-                    // Add the last key and the page number of the parent node, receiving any filled inner nodes.
-                    let last_key = leaf_buf.key((leaf_buf.num_keys() - 1) as usize);
-                    match BTree::add_to_parent(
-                        last_key,
-                        &mut page_count,
-                        0,
-                        &mut lineage,
-                        page_size,
-                    ) {
-                        Some(filled_inner_pages) => {
-                            for page_buf in filled_inner_pages.iter().rev() {
-                                file.write(&page_buf.buf)?;
-                                // page_buf.print();
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    leaf_buf.clear();
-                }
-                page_count += 1;
-            } else {
-                source_empty = true;
-            }
+            file.write(&leaf_buf.buf)?;
         }
+        page_count += 1;
 
         // Write out any incomplete parent nodes, pushing its page number to its parent.
         for index in 0..lineage.len() {

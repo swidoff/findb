@@ -1,12 +1,28 @@
+use findb::btree::v1::{read_csv, BTree, Query};
+use std::fs::File;
+use std::time;
+use std::time::UNIX_EPOCH;
+
 fn main() {
-    let v = vec![1, 3, 5];
-    print_result(v.binary_search(&0));
-    print_result(v.binary_search(&1));
-    print_result(v.binary_search(&2));
-    print_result(v.binary_search(&3));
-    print_result(v.binary_search(&4));
-    print_result(v.binary_search(&5));
-    print_result(v.binary_search(&6));
+    // let mut iterator = read_csv("volume-APPL-IBM-GOOG-2020.csv");
+    // BTree::write_from_iterator("volume-APPL-IBM-GOOG-2020.db", 1024, &mut iterator).unwrap();
+
+    let mut file = File::open("volume-APPL-IBM-GOOG-2020.db").unwrap();
+    let mut btree = BTree::from_file(file).unwrap();
+    let iterator = btree.query(Query {
+        id: 0,
+        asset_id: 1,
+        start_date: 20201001,
+        end_date: 20201031,
+        timestamp: time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32,
+    });
+
+    for result in iterator.unwrap() {
+        println!("{:?}", result.unwrap())
+    }
 }
 
 fn print_result(res: Result<usize, usize>) {

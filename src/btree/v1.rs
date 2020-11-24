@@ -1,17 +1,13 @@
 use std::cmp::{min, Ordering};
 use std::convert::TryInto;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::prelude::*;
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
+use std::str::FromStr;
 
 /// Super simple on-disk btree implementation with fixed-size keys and a single floating point value contained  
 /// inside the node itself rather than in a separate file.
-
-/// TODO: Perform iteration in reverse, from largest to smallest date. This allows for a max_periods more naturally.
-/// The leaf "rightmost-offset" will be a back pointer, rather than a forward pointer.
-///
-/// For ts can return the first encountered where the key timestamp is less than the query timestamp. Can terminate
-/// iteration after max_periods have been yielded.
 
 pub type AssetId = u32;
 pub type Date = u32;
@@ -37,11 +33,11 @@ impl Key {
 }
 
 pub struct Query {
-    id: usize,
-    asset_id: AssetId,
-    start_date: Date,
-    end_date: Date,
-    timestamp: Timestamp,
+    pub id: usize,
+    pub asset_id: AssetId,
+    pub start_date: Date,
+    pub end_date: Date,
+    pub timestamp: Timestamp,
 }
 
 #[derive(PartialEq, PartialOrd, Debug)]
@@ -453,13 +449,11 @@ impl BTree {
         }
 
         let key_index = min(page_buf.index_of(&key), page_buf.num_keys() - 1);
-
-        Ok(QueryResultIterator {
-            file_buf: &mut self.file_buf,
-            key_index: Some(key_index),
+        Ok(QueryResultIterator::new(
+            &mut self.file_buf,
             query,
-            last_yielded_date: None,
-        })
+            key_index,
+        ))
     }
 
     fn print(&mut self) -> std::io::Result<()> {
@@ -484,6 +478,7 @@ pub struct QueryResultIterator<'a> {
     key_index: Option<u32>,
     query: Query,
     last_yielded_date: Option<u32>,
+    pages_read: u32,
 }
 
 enum QueryResultIteratorState {
@@ -514,6 +509,16 @@ impl<'a> Iterator for QueryResultIterator<'a> {
 }
 
 impl<'a> QueryResultIterator<'a> {
+    fn new(file_buf: &'a mut FileBuffer, query: Query, key_index: u32) -> QueryResultIterator<'a> {
+        QueryResultIterator {
+            file_buf,
+            key_index: Some(key_index),
+            query,
+            last_yielded_date: None,
+            pages_read: 1,
+        }
+    }
+
     fn iterate(&mut self) -> std::io::Result<QueryResultIteratorState> {
         match self.key_index {
             None if self.file_buf.page_buf.extra_page_num() == u32::max_value() => {
@@ -522,6 +527,7 @@ impl<'a> QueryResultIterator<'a> {
             None => {
                 let page_num = self.file_buf.page_buf.extra_page_num();
                 self.file_buf.read_page(page_num)?;
+                self.pages_read += 1;
 
                 let num_keys = self.file_buf.page_buf.num_keys();
                 self.key_index = Some(num_keys - 1);
@@ -578,10 +584,24 @@ fn write_f32(buf: &mut [u8], source: f32) {
     buf[0..size_of::<f32>()].copy_from_slice(&source.to_be_bytes()[..])
 }
 
+pub fn read_csv(file_name: &str) -> Box<dyn Iterator<Item = (Key, Value)>> {
+    let file = File::open(file_name).unwrap();
+    let mut reader = BufReader::new(file);
+
+    Box::new(reader.lines().map(|line| {
+        let line = line.unwrap();
+        let mut columns = line.split(",");
+        let asset_id = columns.next().map(|r| u32::from_str(r).unwrap()).unwrap();
+        let date = columns.next().map(|r| u32::from_str(r).unwrap()).unwrap();
+        let timestamp = columns.next().map(|r| u32::from_str(r).unwrap()).unwrap();
+        let value = columns.next().map(|r| f32::from_str(r).unwrap()).unwrap();
+        (Key::new(asset_id, date, timestamp), value)
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::btree::v1::{BTree, Key, PageBuffer, Query, QueryResult};
-    use itertools::Itertools;
     use std::fs;
     use std::fs::File;
     use std::io::Error;
@@ -632,6 +652,7 @@ mod tests {
                 timestamp: 20,
             },
             &[3.0],
+            1,
         );
         check_query(
             &mut btree,
@@ -643,6 +664,7 @@ mod tests {
                 timestamp: 15,
             },
             &[2.0],
+            1,
         );
         check_query(
             &mut btree,
@@ -654,6 +676,7 @@ mod tests {
                 timestamp: 20,
             },
             &[120.0, 12.0, 3.0],
+            3,
         );
         check_query(
             &mut btree,
@@ -665,15 +688,20 @@ mod tests {
                 timestamp: 21,
             },
             &[2200.0, 220.0],
+            2,
         );
     }
 
-    fn check_query(btree: &mut BTree, query: Query, expected: &[f32]) {
-        let actual = btree.query(query).unwrap().collect_vec();
-        assert_eq!(actual.len(), expected.len());
+    fn check_query(btree: &mut BTree, query: Query, expected: &[f32], pages_read: u32) {
+        let mut iterator = btree.query(query).unwrap();
 
-        for (i, actual_result) in actual.iter().enumerate() {
-            assert_eq!(actual_result.as_ref().unwrap().value, expected[i]);
+        for i in 0..expected.len() {
+            match iterator.next() {
+                Some(Ok(v)) => assert_eq!(v.value, expected[i]),
+                _ => panic!("Iterator ran out of elements"),
+            };
         }
+
+        assert_eq!(iterator.pages_read, pages_read);
     }
 }

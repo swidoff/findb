@@ -601,7 +601,7 @@ pub fn read_csv(file_name: &str) -> Box<dyn Iterator<Item = (Key, Value)>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::btree::v1::{BTree, Key, PageBuffer, Query, QueryResult};
+    use crate::btree::file::{BTree, Key, PageBuffer, Query, QueryResult};
     use std::fs;
     use std::fs::File;
     use std::io::Error;

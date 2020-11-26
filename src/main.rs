@@ -1,4 +1,4 @@
-use findb::btree::v1::{read_csv, BTree, Query};
+use findb::btree::file::{read_csv, BTree, Query};
 use std::fs::File;
 use std::time;
 use std::time::UNIX_EPOCH;

@@ -1,3 +1,4 @@
+use crate::btree::cache::{Page, PageCache};
 use std::cmp::{min, Ordering};
 use std::convert::TryInto;
 use std::fs::File;
@@ -14,6 +15,7 @@ pub type Date = u32;
 pub type Timestamp = u32;
 pub type PageNumber = u32;
 pub type Value = f32;
+const U32_SIZE: usize = size_of::<u32>();
 
 #[derive(PartialEq, PartialOrd, Debug)]
 pub struct Key {
@@ -54,76 +56,59 @@ struct FileHeader {
     root_page_number: PageNumber,
 }
 
+const FILE_HEADER_SIZE: usize = size_of::<FileHeader>();
+
 struct FileHeaderBuffer {
-    buf: [u8; size_of::<FileHeader>()],
+    buf: [u8; FILE_HEADER_SIZE],
 }
 
 impl FileHeaderBuffer {
     fn new() -> FileHeaderBuffer {
         FileHeaderBuffer {
-            buf: [0; size_of::<FileHeader>()],
+            buf: [0; FILE_HEADER_SIZE],
         }
     }
 
     fn from_file(file: &mut File) -> std::io::Result<FileHeaderBuffer> {
-        let mut buf = [0; size_of::<FileHeader>()];
+        let mut buf = [0; FILE_HEADER_SIZE];
         file.read(&mut buf).map(|_| FileHeaderBuffer { buf })
     }
 
     fn set(&mut self, header: FileHeader) {
         write_u32(&mut self.buf[0..], header.page_size);
-        write_u32(&mut self.buf[size_of::<u32>()..], header.page_count);
-        write_u32(
-            &mut self.buf[2 * size_of::<u32>()..],
-            header.root_page_number,
-        );
+        write_u32(&mut self.buf[U32_SIZE..], header.page_count);
+        write_u32(&mut self.buf[2 * U32_SIZE..], header.root_page_number);
     }
 
     fn get(&self) -> FileHeader {
         FileHeader {
             page_size: read_u32(&self.buf[0..]),
-            page_count: read_u32(&self.buf[size_of::<u32>()..]),
-            root_page_number: read_u32(&self.buf[2 * size_of::<u32>()..]),
+            page_count: read_u32(&self.buf[U32_SIZE..]),
+            root_page_number: read_u32(&self.buf[2 * U32_SIZE..]),
         }
     }
 }
 
 const LEAF_TYPE: u32 = 0;
 const INNER_TYPE: u32 = 1;
+const PAGE_HEADER_SIZE: usize = 4 * U32_SIZE;
+const KEY_VALUE_SIZE: usize = size_of::<Key>() + size_of::<Value>();
 
-struct PageBuffer {
-    buf: Vec<u8>,
+fn page_size_for_keys(num_keys: u32) -> usize {
+    PAGE_HEADER_SIZE + (num_keys as usize) * KEY_VALUE_SIZE
 }
 
-impl PageBuffer {
-    fn header_size() -> usize {
-        4 * size_of::<u32>()
-    }
+trait BTreePage {
+    fn mut_buf(&mut self) -> &mut [u8];
 
-    fn key_value_size() -> usize {
-        size_of::<Key>() + size_of::<Value>()
-    }
-
-    fn page_size_for_keys(num_keys: u32) -> usize {
-        PageBuffer::header_size() + (num_keys as usize) * PageBuffer::key_value_size()
-    }
-
-    fn new(page_size: u32, page_type: u32) -> PageBuffer {
-        let mut buf = Vec::with_capacity(page_size as usize);
-        for _ in 0..page_size {
-            buf.push(0);
-        }
-        let mut buf = PageBuffer { buf };
-        buf.set_header_field(0, page_type);
-        buf
-    }
+    fn buf(&self) -> &[u8];
 
     fn header_field(&self, index: usize) -> u32 {
-        read_u32(&self.buf[index * size_of::<u32>()..])
+        read_u32(&self.buf()[index * U32_SIZE..])
     }
 
     fn set_header_field(&mut self, index: usize, value: u32) {
-        write_u32(&mut self.buf[index * size_of::<u32>()..], value)
+        write_u32(&mut self.mut_buf()[index * U32_SIZE..], value)
     }
 
     fn page_type(&self) -> u32 {
@@ -147,29 +132,26 @@ impl PageBuffer {
     }
 
     fn key_capacity(&self) -> usize {
-        (self.buf.capacity() - PageBuffer::header_size()) / PageBuffer::key_value_size()
+        (self.buf().len() - PAGE_HEADER_SIZE) / KEY_VALUE_SIZE
     }
 
     fn key_offset(&self, index: usize) -> usize {
-        PageBuffer::header_size() + PageBuffer::key_value_size() * index
+        PAGE_HEADER_SIZE + KEY_VALUE_SIZE * index
     }
 
     fn set_key(&mut self, index: usize, key: Key) {
         let offset = self.key_offset(index);
-        write_u32(&mut self.buf[offset..], key.asset_id);
-        write_u32(&mut self.buf[offset + size_of::<u32>()..], key.date);
-        write_u32(
-            &mut self.buf[offset + 2 * size_of::<u32>()..],
-            key.timestamp,
-        );
+        write_u32(&mut self.mut_buf()[offset..], key.asset_id);
+        write_u32(&mut self.mut_buf()[offset + U32_SIZE..], key.date);
+        write_u32(&mut self.mut_buf()[offset + 2 * U32_SIZE..], key.timestamp);
     }
 
     fn key(&self, index: usize) -> Key {
         let offset = self.key_offset(index);
         Key {
-            asset_id: read_u32(&self.buf[offset..]),
-            date: read_u32(&self.buf[offset + size_of::<u32>()..]),
-            timestamp: read_u32(&self.buf[offset + 2 * size_of::<u32>()..]),
+            asset_id: read_u32(&self.buf()[offset..]),
+            date: read_u32(&self.buf()[offset + U32_SIZE..]),
+            timestamp: read_u32(&self.buf()[offset + 2 * U32_SIZE..]),
         }
     }
 
@@ -178,27 +160,21 @@ impl PageBuffer {
     }
 
     fn value(&self, index: usize) -> Value {
-        read_f32(&self.buf[self.value_offset(index)..])
+        read_f32(&self.buf()[self.value_offset(index)..])
     }
 
     fn set_value(&mut self, index: usize, value: Value) {
         let offset = self.value_offset(index);
-        write_f32(&mut self.buf[offset..], value)
+        write_f32(&mut self.mut_buf()[offset..], value)
     }
 
     fn page_number(&self, index: usize) -> PageNumber {
-        read_u32(&self.buf[self.value_offset(index)..])
+        read_u32(&self.buf()[self.value_offset(index)..])
     }
 
     fn set_page_number(&mut self, index: usize, page_number: PageNumber) {
         let offset = self.value_offset(index);
-        write_u32(&mut self.buf[offset..], page_number)
-    }
-
-    fn clear(&mut self) {
-        for i in 0..self.buf.capacity() {
-            self.buf[i] = 0;
-        }
+        write_u32(&mut self.mut_buf()[offset..], page_number)
     }
 
     fn index_of(&self, key: &Key) -> u32 {
@@ -254,36 +230,72 @@ impl PageBuffer {
     }
 }
 
+struct PageBuffer {
+    buf: Vec<u8>,
+}
+
+impl PageBuffer {
+    fn new(page_size: u32, page_type: u32) -> PageBuffer {
+        let mut buf = Vec::with_capacity(page_size as usize);
+        for _ in 0..page_size {
+            buf.push(0);
+        }
+        let mut buf = PageBuffer { buf };
+        buf.set_header_field(0, page_type);
+        buf
+    }
+
+    fn clear(&mut self) {
+        for i in 0..self.buf.capacity() {
+            self.buf[i] = 0;
+        }
+    }
+}
+
+impl BTreePage for PageBuffer {
+    fn mut_buf(&mut self) -> &mut [u8] {
+        &mut self.buf[..]
+    }
+
+    fn buf(&self) -> &[u8] {
+        &self.buf[..]
+    }
+}
+
+impl<'a> BTreePage for Page<'a> {
+    fn mut_buf(&mut self) -> &mut [u8] {
+        &mut self.buf
+    }
+
+    fn buf(&self) -> &[u8] {
+        &self.buf
+    }
+}
+
 struct FileBuffer {
-    file: File,
     file_header: FileHeader,
-    page_buf: PageBuffer,
+    page_cache: PageCache,
 }
 
 impl FileBuffer {
-    fn new(file: File) -> std::io::Result<FileBuffer> {
+    fn new(file: File, page_cache_size: usize) -> std::io::Result<FileBuffer> {
         let mut file = file;
         let file_header_buf = FileHeaderBuffer::from_file(&mut file)?;
         let file_header = file_header_buf.get();
-        let page_size = file_header.page_size;
-        let page_buf = PageBuffer::new(page_size, INNER_TYPE);
+        let page_size = file_header.page_size as usize;
+        let page_cache = PageCache::new(file, page_size, page_cache_size, FILE_HEADER_SIZE as u64);
         Ok(FileBuffer {
-            file,
             file_header,
-            page_buf,
+            page_cache,
         })
     }
 
-    fn read_root_page(&mut self) -> std::io::Result<&PageBuffer> {
+    fn read_root_page(&mut self) -> std::io::Result<Page> {
         self.read_page(self.file_header.root_page_number)
     }
 
-    fn read_page(&mut self, page_number: u32) -> std::io::Result<&PageBuffer> {
-        self.file.seek(SeekFrom::Start(
-            (size_of::<FileHeader>() as u64) + ((self.file_header.page_size * page_number) as u64),
-        ))?;
-        self.file.read(&mut self.page_buf.buf)?;
-        return Ok(&self.page_buf);
+    fn read_page(&mut self, page_number: u32) -> std::io::Result<Page> {
+        self.page_cache.load(page_number as usize)
     }
 }
 
@@ -292,9 +304,9 @@ pub struct BTree {
 }
 
 impl BTree {
-    pub fn from_file(file: File) -> std::io::Result<BTree> {
+    pub fn from_file(file: File, page_cache_size: usize) -> std::io::Result<BTree> {
         Ok(BTree {
-            file_buf: FileBuffer::new(file)?,
+            file_buf: FileBuffer::new(file, page_cache_size)?,
         })
     }
 
@@ -430,27 +442,28 @@ impl BTree {
     }
 
     pub fn query(&mut self, query: Query) -> std::io::Result<QueryResultIterator> {
-        let mut page_buf = self.file_buf.read_root_page()?;
+        let mut page = self.file_buf.read_root_page()?;
 
         let key = Key {
             asset_id: query.asset_id,
             date: query.end_date,
             timestamp: query.timestamp,
         };
-        while page_buf.page_type() == INNER_TYPE {
-            let index = page_buf.index_of(&key) as usize;
-            let page_num = if index < page_buf.key_capacity() {
-                page_buf.page_number(index)
+        while page.page_type() == INNER_TYPE {
+            let index = page.index_of(&key) as usize;
+            let page_num = if index < page.key_capacity() {
+                page.page_number(index)
             } else {
-                page_buf.extra_page_num()
+                page.extra_page_num()
             };
 
-            page_buf = self.file_buf.read_page(page_num)?;
+            page = self.file_buf.read_page(page_num)?;
         }
 
-        let key_index = min(page_buf.index_of(&key), page_buf.num_keys() - 1);
+        let key_index = min(page.index_of(&key), page.num_keys() - 1);
         Ok(QueryResultIterator::new(
-            &mut self.file_buf,
+            &mut self.file_buf.page_cache,
+            page,
             query,
             key_index,
         ))
@@ -474,7 +487,8 @@ impl BTree {
 }
 
 pub struct QueryResultIterator<'a> {
-    file_buf: &'a mut FileBuffer,
+    page_cache: &'a mut PageCache,
+    page: Page<'a>,
     key_index: Option<u32>,
     query: Query,
     last_yielded_date: Option<u32>,
@@ -509,9 +523,15 @@ impl<'a> Iterator for QueryResultIterator<'a> {
 }
 
 impl<'a> QueryResultIterator<'a> {
-    fn new(file_buf: &'a mut FileBuffer, query: Query, key_index: u32) -> QueryResultIterator<'a> {
+    fn new(
+        page_cache: &'a mut PageCache,
+        page: Page<'a>,
+        query: Query,
+        key_index: u32,
+    ) -> QueryResultIterator<'a> {
         QueryResultIterator {
-            file_buf,
+            page_cache,
+            page,
             key_index: Some(key_index),
             query,
             last_yielded_date: None,
@@ -521,21 +541,20 @@ impl<'a> QueryResultIterator<'a> {
 
     fn iterate(&mut self) -> std::io::Result<QueryResultIteratorState> {
         match self.key_index {
-            None if self.file_buf.page_buf.extra_page_num() == u32::max_value() => {
+            None if self.page.extra_page_num() == u32::max_value() => {
                 Ok(QueryResultIteratorState::YieldResult(None))
             }
             None => {
-                let page_num = self.file_buf.page_buf.extra_page_num();
-                self.file_buf.read_page(page_num)?;
+                let page_num = self.page.extra_page_num();
+                self.page = self.page_cache.load(page_num as usize)?;
                 self.pages_read += 1;
 
-                let num_keys = self.file_buf.page_buf.num_keys();
+                let num_keys = self.page.num_keys();
                 self.key_index = Some(num_keys - 1);
                 Ok(QueryResultIteratorState::Continue)
             }
             Some(key_index) => {
-                let page_buf = &self.file_buf.page_buf;
-                let key = page_buf.key(key_index as usize);
+                let key = self.page.key(key_index as usize);
                 if key.asset_id < self.query.asset_id || key.date < self.query.start_date {
                     Ok(QueryResultIteratorState::YieldResult(None))
                 } else {
@@ -557,7 +576,7 @@ impl<'a> QueryResultIterator<'a> {
                         _ => Ok(QueryResultIteratorState::YieldResult(Some(QueryResult {
                             id: self.query.id,
                             key,
-                            value: page_buf.value(key_index as usize),
+                            value: self.page.value(key_index as usize),
                         }))),
                     }
                 }
@@ -567,12 +586,12 @@ impl<'a> QueryResultIterator<'a> {
 }
 
 fn read_u32(buf: &[u8]) -> u32 {
-    let (int_bytes, _) = buf.split_at(size_of::<u32>());
+    let (int_bytes, _) = buf.split_at(U32_SIZE);
     return u32::from_be_bytes(int_bytes.try_into().unwrap());
 }
 
 fn write_u32(buf: &mut [u8], source: u32) {
-    buf[0..size_of::<u32>()].copy_from_slice(&source.to_be_bytes()[..])
+    buf[0..U32_SIZE].copy_from_slice(&source.to_be_bytes()[..])
 }
 
 fn read_f32(buf: &[u8]) -> f32 {
@@ -601,7 +620,7 @@ pub fn read_csv(file_name: &str) -> Box<dyn Iterator<Item = (Key, Value)>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::btree::file::{BTree, Key, PageBuffer, Query, QueryResult};
+    use crate::btree::file::{BTree, BTreePage, Key, PageBuffer, Query, QueryResult};
     use std::fs;
     use std::fs::File;
     use std::io::Error;
@@ -635,11 +654,11 @@ mod tests {
             (Key::new(1, 20200430, 25), 2300.0),
         ];
         let mut iter = inputs.into_iter();
-        let page_size = PageBuffer::page_size_for_keys(3);
+        let page_size = BTreePage::page_size_for_keys(3);
         BTree::write_from_iterator(path, page_size as u32, &mut iter).unwrap();
 
         let file = File::open(path).unwrap();
-        let mut btree = BTree::from_file(file).unwrap();
+        let mut btree = BTree::from_file(file, 10).unwrap();
         btree.print();
 
         check_query(

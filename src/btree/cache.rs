@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 
 struct Clock {
     clock: Vec<u8>,
@@ -57,24 +58,25 @@ impl Clock {
     }
 }
 
-struct PageCache {
+pub struct PageCache {
     file: File,
     page_size: usize,
     pages: usize,
+    header_bytes: u64,
     buf: Vec<u8>,
     clock: Clock,
     page_map: HashMap<usize, usize>,
     slot_map: HashMap<usize, usize>,
 }
 
-struct Page<'a> {
-    buf: &'a [u8],
+pub struct Page<'a> {
+    pub buf: &'a mut [u8],
 }
 
 impl PageCache {
-    fn new(file: File, page_size: usize, pages: usize) -> PageCache {
+    pub fn new(file: File, page_size: usize, pages: usize, header_bytes: u64) -> PageCache {
         let mut buf = Vec::with_capacity(page_size * pages);
-        for i in 0..buf.capacity() {
+        for _ in 0..buf.capacity() {
             buf.push(0);
         }
 
@@ -82,6 +84,7 @@ impl PageCache {
             file,
             page_size,
             pages,
+            header_bytes,
             buf,
             clock: Clock::new(pages),
             page_map: HashMap::new(),
@@ -89,16 +92,37 @@ impl PageCache {
         }
     }
 
-    fn load(&mut self, page_number: usize) -> std::io::Result<Page> {
+    pub fn load(&mut self, page_number: usize) -> std::io::Result<Page> {
         match self.page_map.get(&page_number) {
             Some(slot_number) => {
-                let page_start = slot_number * self.page_size;
-                let page_end = (slot_number + 1) * self.page_size;
-                let buf = &self.buf[page_start..page_end];
                 self.clock.set(*slot_number);
-                Ok(Page { buf })
+                self.page_from_slot(*slot_number, false)
             }
-            None => {}
+            None => {
+                let slot_number = if self.page_map.len() < self.pages {
+                    self.page_map.len()
+                } else {
+                    self.clock.evict()
+                };
+
+                self.page_map.insert(page_number, slot_number);
+                self.slot_map.insert(slot_number, page_number);
+                self.page_from_slot(slot_number, true)
+            }
         }
+    }
+
+    fn page_from_slot(&mut self, slot_number: usize, read: bool) -> std::io::Result<Page> {
+        let page_start = slot_number * self.page_size;
+        let page_end = (slot_number + 1) * self.page_size;
+        let buf = &mut self.buf[page_start..page_end];
+        if read {
+            let offset = (page_start as u64) + self.header_bytes;
+            self.file.seek(SeekFrom::Start(offset))?;
+            self.file.read(buf)?;
+        }
+
+        self.clock.set(slot_number);
+        Ok(Page { buf })
     }
 }

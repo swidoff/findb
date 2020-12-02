@@ -7,7 +7,7 @@ fn main() {
     // let mut iterator = read_csv("volume-APPL-IBM-GOOG-2020.csv");
     // BTree::write_from_iterator("volume-APPL-IBM-GOOG-2020.db", 1024, &mut iterator).unwrap();
 
-    let mut file = File::open("volume-APPL-IBM-GOOG-2020.db").unwrap();
+    let file = File::open("volume-APPL-IBM-GOOG-2020.db").unwrap();
     let mut btree = BTree::from_file(file).unwrap();
     let iterator = btree.query(Query {
         id: 0,

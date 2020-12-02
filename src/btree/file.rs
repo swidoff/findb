@@ -620,7 +620,7 @@ pub fn read_csv(file_name: &str) -> Box<dyn Iterator<Item = (Key, Value)>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::btree::file::{BTree, BTreePage, Key, PageBuffer, Query, QueryResult};
+    use crate::btree::file::{page_size_for_keys, BTree, Key, PageBuffer, Query, QueryResult};
     use std::fs;
     use std::fs::File;
     use std::io::Error;
@@ -654,7 +654,7 @@ mod tests {
             (Key::new(1, 20200430, 25), 2300.0),
         ];
         let mut iter = inputs.into_iter();
-        let page_size = BTreePage::page_size_for_keys(3);
+        let page_size = page_size_for_keys(3);
         BTree::write_from_iterator(path, page_size as u32, &mut iter).unwrap();
 
         let file = File::open(path).unwrap();

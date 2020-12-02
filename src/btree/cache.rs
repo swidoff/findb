@@ -94,10 +94,7 @@ impl PageCache {
 
     pub fn load(&mut self, page_number: usize) -> std::io::Result<Page> {
         match self.page_map.get(&page_number) {
-            Some(slot_number) => {
-                self.clock.set(*slot_number);
-                self.page_from_slot(*slot_number, false)
-            }
+            Some(slot_number) => self.page_from_slot(*slot_number, false),
             None => {
                 let slot_number = if self.page_map.len() < self.pages {
                     self.page_map.len()

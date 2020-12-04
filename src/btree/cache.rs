@@ -69,10 +69,6 @@ pub struct PageCache {
     slot_map: HashMap<usize, usize>,
 }
 
-pub struct Page<'a> {
-    pub buf: &'a mut [u8],
-}
-
 impl PageCache {
     pub fn new(file: File, page_size: usize, pages: usize, header_bytes: u64) -> PageCache {
         let mut buf = Vec::with_capacity(page_size * pages);
@@ -92,14 +88,21 @@ impl PageCache {
         }
     }
 
-    pub fn load(&mut self, page_number: usize) -> std::io::Result<Page> {
+    pub fn load(&mut self, page_number: usize) -> std::io::Result<&[u8]> {
         match self.page_map.get(&page_number) {
-            Some(slot_number) => self.page_from_slot(*slot_number, false),
+            Some(slot_number) => {
+                let num = *slot_number;
+                self.page_from_slot(num, false)
+            }
             None => {
                 let slot_number = if self.page_map.len() < self.pages {
                     self.page_map.len()
                 } else {
-                    self.clock.evict()
+                    let slot_number = self.clock.evict();
+                    if let Some(evicted_page_num) = self.slot_map.get(&slot_number) {
+                        self.page_map.remove(evicted_page_num);
+                    }
+                    slot_number
                 };
 
                 self.page_map.insert(page_number, slot_number);
@@ -109,7 +112,7 @@ impl PageCache {
         }
     }
 
-    fn page_from_slot(&mut self, slot_number: usize, read: bool) -> std::io::Result<Page> {
+    fn page_from_slot(&mut self, slot_number: usize, read: bool) -> std::io::Result<&[u8]> {
         let page_start = slot_number * self.page_size;
         let page_end = (slot_number + 1) * self.page_size;
         let buf = &mut self.buf[page_start..page_end];
@@ -120,6 +123,6 @@ impl PageCache {
         }
 
         self.clock.set(slot_number);
-        Ok(Page { buf })
+        Ok(buf)
     }
 }
